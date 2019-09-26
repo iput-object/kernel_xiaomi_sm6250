@@ -236,6 +236,7 @@ struct tcp_sock {
 		is_sack_reneg:1,    /* in recovery from loss with SACK reneg? */
 		unused:3;
 	u8	nonagle     : 4,/* Disable Nagle algorithm?             */
+		tlp_orig_data_app_limited: 1,
 		thin_lto    : 1,/* Use linear timeouts for thin streams */
 		unused1	    : 1,
 		repair      : 1,

@@ -3847,6 +3847,8 @@ static int tcp_ack(struct sock *sk, const struct sk_buff *skb, int flag)
 
 	prior_fackets = tp->fackets_out;
 	rs.prior_in_flight = tcp_packets_in_flight(tp);
+	rs.is_acking_tlp_retrans_seq = tcp_has_tlp_probe(tp) &&
+		(ack == tp->tlp_high_seq);
 	tcp_rate_check_app_limited(sk);
 
 	/* ts_recent update must be made after we are sure that the packet

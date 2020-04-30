@@ -1015,6 +1015,7 @@ _out_egress:			\
 
 #ifdef CONFIG_BPF_SYSCALL
 DECLARE_PER_CPU(int, bpf_prog_active);
+extern struct mutex bpf_stats_enabled_mutex;
 
 /*
  * Block execution of BPF programs attached to instrumentation (perf,

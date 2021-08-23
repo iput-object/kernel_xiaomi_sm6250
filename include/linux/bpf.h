@@ -1086,9 +1086,14 @@ int bpf_prog_array_copy(struct bpf_prog_array *old_array,
 			if (!_prog || (unsigned long)_prog < PAGE_SIZE || \
 			    ((unsigned long)_prog & 0xffff000000000000) == 0xdead000000000000) \
 				break;			\
-			if (set_cg_storage)		\
-				bpf_cgroup_storage_set(_item->cgroup_storage);	\
-			_ret &= func(_prog, ctx);	\
+			if (!set_cg_storage) {			\
+				_ret &= func(_prog, ctx);	\
+			} else {				\
+				if (unlikely(bpf_cgroup_storage_set(_item->cgroup_storage)))	\
+					break;			\
+				_ret &= func(_prog, ctx);	\
+				bpf_cgroup_storage_unset();	\
+			}				\
 			_item++;			\
 			_cnt++;				\
 		}					\
@@ -1144,8 +1149,10 @@ _out:							\
 			if (!_prog || (unsigned long)_prog < PAGE_SIZE || \
 			    ((unsigned long)_prog & 0xffff000000000000) == 0xdead000000000000) \
 				break;			\
-			bpf_cgroup_storage_set(_item->cgroup_storage);	\
+			if (unlikely(bpf_cgroup_storage_set(_item->cgroup_storage)))	\
+				break;			\
 			ret = func(_prog, ctx);		\
+			bpf_cgroup_storage_unset();	\
 			_ret &= (ret & 1);		\
 			_cn |= (ret & 2);		\
 			_item++;			\

@@ -81,6 +81,9 @@ struct f_ncm {
 	struct hrtimer			task_timer;
 
 	bool				timer_stopping;
+	
+	/* Keep-alive timer */
+	struct hrtimer keepalive_timer;
 };
 
 static inline struct f_ncm *func_to_ncm(struct usb_function *f)
@@ -124,7 +127,7 @@ static inline unsigned ncm_bitrate(struct usb_gadget *g)
 #define TX_MAX_NUM_DPE		32
 
 /* Delay for the transmit to wait before sending an unfilled NTB frame. */
-#define TX_TIMEOUT_NSECS	300000
+#define TX_TIMEOUT_NSECS	2000000
 
 #define FORMATS_SUPPORTED	(USB_CDC_NCM_NTB16_SUPPORTED |	\
 				 USB_CDC_NCM_NTB32_SUPPORTED)
@@ -899,8 +902,15 @@ static int ncm_set_alt(struct usb_function *f, unsigned intf, unsigned alt)
 		if (ncm->port.in_ep->enabled) {
 			DBG(cdev, "reset ncm\n");
 			ncm->timer_stopping = true;
-			ncm->netdev = NULL;
+	
+	/* Ensure no concurrent access during reset */
+			spin_lock(&ncm->lock);
+			hrtimer_cancel(&ncm->task_timer);
+			tasklet_kill(&ncm->tx_tasklet);
 			gether_disconnect(&ncm->port);
+			ncm->netdev = NULL;
+			spin_unlock(&ncm->lock);
+	
 			ncm_reset_values(ncm);
 		}
 
@@ -937,6 +947,9 @@ static int ncm_set_alt(struct usb_function *f, unsigned intf, unsigned alt)
 				return PTR_ERR(net);
 			ncm->netdev = net;
 			ncm->timer_stopping = false;
+			/* Start keep-alive timer */
+			hrtimer_start(&ncm->keepalive_timer, 10000000000ULL, HRTIMER_MODE_REL);
+			DBG(cdev, "keepalive started\n");
 		}
 
 		spin_lock(&ncm->lock);
@@ -1111,9 +1124,11 @@ static struct sk_buff *ncm_wrap_ntb(struct gether *port,
 			/* Note: we skip opts->next_ndp_index */
 		}
 
-		/* Delay the timer. */
-		hrtimer_start(&ncm->task_timer, TX_TIMEOUT_NSECS,
-			      HRTIMER_MODE_REL);
+		/* Delay the timer with connection state check */
+		if (!ncm->timer_stopping && ncm->is_open && ncm->netdev) {
+			hrtimer_start(&ncm->task_timer, TX_TIMEOUT_NSECS,
+			HRTIMER_MODE_REL);
+		}
 
 		/* Add the datagram position entries */
 		ntb_ndp = skb_put_zero(ncm->skb_tx_ndp, dgram_idx_len);
@@ -1189,7 +1204,38 @@ static void ncm_tx_tasklet(unsigned long data)
 static enum hrtimer_restart ncm_tx_timeout(struct hrtimer *data)
 {
 	struct f_ncm *ncm = container_of(data, struct f_ncm, task_timer);
-	tasklet_schedule(&ncm->tx_tasklet);
+	
+	/* Critical: Check connection state before scheduling tasklet */
+	if (!ncm || !ncm->is_open || ncm->timer_stopping || !ncm->netdev) {
+		DBG(ncm ? ncm->port.func.config->cdev : NULL,
+		    "ncm_tx_timeout: invalid state, stopping timer\n");
+		return HRTIMER_NORESTART;
+	}
+
+	/* Only schedule if we have pending data */
+	if (ncm->skb_tx_data) {
+		tasklet_schedule(&ncm->tx_tasklet);
+	}
+	
+	return HRTIMER_NORESTART;
+}
+
+/* Simple keep-alive timer */
+static enum hrtimer_restart ncm_keepalive_timeout(struct hrtimer *data)
+{
+	struct f_ncm *ncm = container_of(data, struct f_ncm, keepalive_timer);
+	
+	if (!ncm || !ncm->is_open || ncm->timer_stopping || !ncm->netdev) {
+		return HRTIMER_NORESTART;
+	}
+	
+	/* Force small TX to keep connection alive */
+	if (ncm->skb_tx_data) {
+		tasklet_schedule(&ncm->tx_tasklet);
+	}
+	
+	/* Restart timer for 20 seconds */
+	hrtimer_start(&ncm->keepalive_timer, 20000000000ULL, HRTIMER_MODE_REL);
 	return HRTIMER_NORESTART;
 }
 
@@ -1243,6 +1289,13 @@ parse_ntb:
 
 	ndp_index = get_ncm(&tmp, opts->ndp_index);
 
+	/* Enhanced NTB validation for Windows 11 compatibility */
+	if (block_len == 0 || ndp_index == 0 || 
+		ndp_index < opts->nth_size || ndp_index >= block_len) {
+		INFO(port->func.config->cdev, "Invalid NTB structure detected\n");
+		goto err;
+	}
+	
 	/* Run through all the NDP's in the NTB */
 	do {
 		/*
@@ -1398,8 +1451,14 @@ static void ncm_disable(struct usb_function *f)
 
 	if (ncm->port.in_ep->enabled) {
 		ncm->timer_stopping = true;
-		ncm->netdev = NULL;
+		
+	/* Stop keep-alive */
+		hrtimer_cancel(&ncm->keepalive_timer);
+		
+		hrtimer_cancel(&ncm->task_timer);
+		tasklet_kill(&ncm->tx_tasklet);
 		gether_disconnect(&ncm->port);
+		ncm->netdev = NULL;
 	}
 
 	if (ncm->notify->enabled) {
@@ -1587,6 +1646,10 @@ static int ncm_bind(struct usb_configuration *c, struct usb_function *f)
 	tasklet_init(&ncm->tx_tasklet, ncm_tx_tasklet, (unsigned long) ncm);
 	hrtimer_init(&ncm->task_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 	ncm->task_timer.function = ncm_tx_timeout;
+	
+	/* Initialize keep-alive timer */
+	hrtimer_init(&ncm->keepalive_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+	ncm->keepalive_timer.function = ncm_keepalive_timeout;
 
 	DBG(cdev, "CDC Network: %s speed IN/%s OUT/%s NOTIFY/%s\n",
 			gadget_is_superspeed(c->cdev->gadget) ? "super" :
@@ -1771,6 +1834,7 @@ static void ncm_unbind(struct usb_configuration *c, struct usb_function *f)
 	DBG(c->cdev, "ncm unbind\n");
 
 	hrtimer_cancel(&ncm->task_timer);
+	hrtimer_cancel(&ncm->keepalive_timer);
 	tasklet_kill(&ncm->tx_tasklet);
 
 	kfree(f->os_desc_table);

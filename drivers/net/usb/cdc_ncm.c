@@ -1464,11 +1464,13 @@ EXPORT_SYMBOL_GPL(cdc_ncm_fill_tx_frame);
 
 static void cdc_ncm_tx_timeout_start(struct cdc_ncm_ctx *ctx)
 {
-	/* start timer, if not already started */
-	if (!(hrtimer_active(&ctx->tx_timer) || atomic_read(&ctx->stop)))
+	/* start timer, if not already started and we have pending data */
+	if (!(hrtimer_active(&ctx->tx_timer) || atomic_read(&ctx->stop)) && 
+		ctx->tx_curr_skb && ctx->tx_curr_frame_num > 0) {
 		hrtimer_start(&ctx->tx_timer,
 				ctx->timer_interval,
 				HRTIMER_MODE_REL);
+	}
 }
 
 static enum hrtimer_restart cdc_ncm_tx_timer_cb(struct hrtimer *timer)
@@ -1476,8 +1478,10 @@ static enum hrtimer_restart cdc_ncm_tx_timer_cb(struct hrtimer *timer)
 	struct cdc_ncm_ctx *ctx =
 			container_of(timer, struct cdc_ncm_ctx, tx_timer);
 
-	if (!atomic_read(&ctx->stop))
+	/* Enhanced state checking */
+	if (!atomic_read(&ctx->stop) && ctx->tx_curr_skb && ctx->tx_curr_frame_num > 0) {
 		tasklet_schedule(&ctx->bh);
+	}
 	return HRTIMER_NORESTART;
 }
 

@@ -7,7 +7,7 @@ on:
         description: "Kernel name (zip name)"
         required: true
         type: string
-        default: "Saber"
+        default: "LazyExec"
       ksu:
         description: "Build with KernelSU-Next + SUSFS"
         required: true

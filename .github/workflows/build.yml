@@ -108,7 +108,13 @@ jobs:
             CROSS_COMPILE=aarch64-linux-gnu- \
             CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
             Image.gz dtbo.img dtb.img 2>&1 | tee build.log
-          exit "${PIPESTATUS[0]}"
+          rc="${PIPESTATUS[0]}"
+          if [ "$rc" -ne 0 ]; then
+            # surface compiler/linker errors as annotations (readable without downloading the log)
+            grep -E 'error:|Error [0-9]|undefined reference|undefined symbol|ld.lld:' build.log | grep -v '^make\[' | sort -u | head -40 |
+              while IFS= read -r l; do echo "::error::${l//%/%25}"; done
+          fi
+          exit "$rc"
 
       - name: Check config
         run: |

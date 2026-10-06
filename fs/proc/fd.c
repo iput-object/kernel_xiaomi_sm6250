@@ -129,7 +129,9 @@ orig_flow:
 #if defined(CONFIG_KSU_SUSFS_SUS_MOUNT) || defined(CONFIG_KSU_SUSFS_SUS_KSTAT)
 	seq_printf(m, "pos:\t%lli\nflags:\t0%o\nmnt_id:\t%i\nino:\t%lu\n",
 			(long long)file->f_pos, f_flags,
-			mnt->mnt_id);
+			real_mount(file->f_path.mnt)->mnt_id,
+			file_inode(file)->i_ino);
+bypass_orig_flow:
 #else
 	seq_printf(m, "pos:\t%lli\nflags:\t0%o\nmnt_id:\t%i\n",
 		   (long long)file->f_pos, f_flags,

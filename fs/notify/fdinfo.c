@@ -131,6 +131,7 @@ static void inotify_fdinfo(struct seq_file *m, struct fsnotify_mark *mark)
 #endif // #ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
 
 #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+		mnt = real_mount(file->f_path.mnt);
 		if (likely(susfs_is_current_proc_umounted()) &&
 					mnt->mnt_id >= DEFAULT_KSU_MNT_ID)
 		{

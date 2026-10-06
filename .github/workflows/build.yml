@@ -1,0 +1,156 @@
+name: Build Kernel
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_name:
+        description: "Kernel name (zip name)"
+        required: true
+        type: string
+        default: "Saber"
+      ksu:
+        description: "Build with KernelSU-Next + SUSFS"
+        required: true
+        type: boolean
+        default: true
+      ksu_repo:
+        description: "KernelSU-Next repository"
+        required: true
+        type: string
+        default: "https://github.com/sidex15/KernelSU-Next"
+      ksu_branch:
+        description: "KernelSU-Next branch (non-GKI + SUSFS v2)"
+        required: true
+        type: string
+        default: "legacy-susfs-v2"
+      clang_url:
+        description: "Clang toolchain (.tar.gz)"
+        required: true
+        type: string
+        default: "https://github.com/topnotchfreaks/clang/releases/download/v1.0.0/clang-r547379.tar.gz"
+      release:
+        description: "Publish a GitHub release"
+        required: true
+        type: boolean
+        default: false
+
+env:
+  DEFCONFIG: "vendor/xiaomi/miatoll_defconfig"
+  KERNEL_NAME: ${{ inputs.kernel_name || 'LazyExec' }}
+  KSU: ${{ inputs.ksu }}
+  KSU_REPO: ${{ inputs.ksu_repo || 'https://github.com/sidex15/KernelSU-Next' }}
+  KSU_BRANCH: ${{ inputs.ksu_branch || 'legacy-susfs-v2' }}
+  CLANG_URL: ${{ inputs.clang_url || 'https://github.com/topnotchfreaks/clang/releases/download/v1.0.0/clang-r547379.tar.gz' }}
+  KBUILD_BUILD_USER: ${{ github.repository_owner }}
+  KBUILD_BUILD_HOST: "github-actions"
+
+jobs:
+  build:
+    name: Build (${{ inputs.ksu && 'KSUN-SUSFS' || 'Stock' }})
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -yqq --no-install-recommends \
+            bc bison build-essential ccache curl flex git libssl-dev \
+            libelf-dev lzop python3 unzip zip zlib1g-dev cpio
+
+      - name: Cache clang
+        id: cache-clang
+        uses: actions/cache@v4
+        with:
+          path: clang
+          key: clang-${{ hashFiles('.github/workflows/build.yml') }}-${{ env.CLANG_URL }}
+
+      - name: Download clang
+        if: steps.cache-clang.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p clang
+          curl -LSs "$CLANG_URL" | tar -xzf - -C clang
+
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-${{ env.KSU }}-${{ github.sha }}
+          restore-keys: |
+            ccache-${{ env.KSU }}-
+            ccache-
+
+      - name: Set up KernelSU-Next
+        if: env.KSU == 'true'
+        run: |
+          # drivers/kernelsu is a symlink to ../KernelSU/kernel; the Makefile and Kconfig entries are already in tree
+          git clone --depth 1 -b "$KSU_BRANCH" "$KSU_REPO" KernelSU
+          echo "KernelSU-Next: $(git -C KernelSU log -1 --format='%h %s')"
+
+      - name: Drop KernelSU from config
+        if: env.KSU != 'true'
+        run: sed -i '/CONFIG_KSU/d' "arch/arm64/configs/${DEFCONFIG}"
+
+      - name: Build
+        run: |
+          export PATH="$GITHUB_WORKSPACE/clang/bin:$PATH"
+          export ARCH=arm64 SUBARCH=arm64
+          ccache -M 3G
+          make O=out "${DEFCONFIG}"
+          make -j"$(nproc --all)" O=out \
+            LLVM=1 LLVM_IAS=1 CC="ccache clang" \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            Image.gz dtbo.img dtb.img 2>&1 | tee build.log
+          exit "${PIPESTATUS[0]}"
+
+      - name: Check config
+        run: |
+          grep -E 'CONFIG_LOCALVERSION=|CONFIG_MEMCG=|CONFIG_PSI=|CONFIG_KSU=|CONFIG_KSU_MANUAL_HOOK=|CONFIG_KSU_SUSFS=' out/.config || true
+          ccache -s
+
+      - name: Upload build log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+
+      - name: Package AnyKernel3
+        id: pack
+        run: |
+          git clone -q --depth 1 -b miatoll https://github.com/RapliVx/AnyKernel3 AnyKernel3
+          rm -rf AnyKernel3/.git AnyKernel3/.github
+          sed -i "s/^kernel.string=.*/kernel.string=${KERNEL_NAME} Kernel for miatoll/" AnyKernel3/anykernel.sh
+          cp out/arch/arm64/boot/Image.gz AnyKernel3/
+          cp out/arch/arm64/boot/dtbo.img AnyKernel3/
+          # AnyKernel3 replaces the boot dtb only when the file is named "dtb"
+          cp out/arch/arm64/boot/dtb.img AnyKernel3/dtb
+          variant=$([ "$KSU" = true ] && echo KSUN-SUSFS || echo Stock)
+          zip_name="${KERNEL_NAME}-miatoll-${variant}-$(date +%Y%m%d)-${GITHUB_SHA::7}.zip"
+          (cd AnyKernel3 && zip -r9 "../${zip_name}" . -x README.md)
+          echo "zip=${zip_name}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.pack.outputs.zip }}
+          path: ${{ steps.pack.outputs.zip }}
+          compression-level: 0
+
+      - name: Release
+        if: inputs.release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "${{ env.KERNEL_NAME }}-${{ github.run_number }}"
+          name: "${{ env.KERNEL_NAME }} #${{ github.run_number }}"
+          files: ${{ steps.pack.outputs.zip }}
+          body: |
+            Device: Redmi Note 9 Pro / Note 9S / Poco M2 Pro / Note 9 Pro Max (miatoll)
+            KernelSU-Next: ${{ env.KSU == 'true' && format('{0} @ {1}', env.KSU_REPO, env.KSU_BRANCH) || 'not included' }}

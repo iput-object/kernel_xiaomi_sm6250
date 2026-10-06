@@ -102,11 +102,14 @@ jobs:
           export PATH="$GITHUB_WORKSPACE/clang/bin:$PATH"
           export ARCH=arm64 SUBARCH=arm64
           ccache -M 3G
-          make O=out "${DEFCONFIG}"
-          make -j"$(nproc --all)" O=out \
-            LLVM=1 LLVM_IAS=1 CC="ccache clang" \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+          # LLVM_IAS=1 makes clang use its own assembler; LTO still falls back to
+          # GNU gold unless ld.lld and the llvm tools are named explicitly
+          MAKE_ARGS=(O=out LLVM=1 LLVM_IAS=1 CC="ccache clang" LD=ld.lld
+            AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip
+            CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu-
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi-)
+          make "${MAKE_ARGS[@]}" "${DEFCONFIG}"
+          make -j"$(nproc --all)" "${MAKE_ARGS[@]}" \
             Image.gz dtbo.img dtb.img 2>&1 | tee build.log
           rc="${PIPESTATUS[0]}"
           if [ "$rc" -ne 0 ]; then

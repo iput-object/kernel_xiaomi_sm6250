@@ -1,6 +1,11 @@
 name: Build Kernel
 
+# Release: push a tag like v1.1 (stable) or v1.1-beta1 (pre-release) -> builds KSU + NoKSU and publishes
+# Test build: Run workflow on any branch -> version is <branch>-<commit>, no release
 on:
+  push:
+    tags:
+      - "v*"
   workflow_dispatch:
     inputs:
       ksu:
@@ -8,15 +13,9 @@ on:
         required: true
         type: boolean
         default: true
-      release:
-        description: "Publish release"
-        required: true
-        type: boolean
-        default: false
 
 env:
   DEFCONFIG: "vendor/xiaomi/miatoll_defconfig"
-  KSU: ${{ inputs.ksu }}
   KSU_REPO: "https://github.com/sidex15/KernelSU-Next"
   KSU_BRANCH: "legacy-susfs-v2"
   CLANG_URL: "https://github.com/topnotchfreaks/clang/releases/download/v1.0.0/clang-r547379.tar.gz"
@@ -25,16 +24,35 @@ env:
 
 jobs:
   build:
-    name: Build (${{ inputs.ksu && 'KSUN-SUSFS' || 'NoKSU' }})
+    name: Build (${{ matrix.ksu && 'KSUN-SUSFS' || 'NoKSU' }})
     runs-on: ubuntu-22.04
-    permissions:
-      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        ksu: ${{ fromJSON(github.event_name == 'push' && '[true, false]' || format('[{0}]', inputs.ksu)) }}
+    env:
+      KSU: ${{ matrix.ksu }}
 
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
+
+      - name: Set version
+        run: |
+          # kernel name comes from CONFIG_LOCALVERSION, the version from the tag
+          name=$(sed -n 's/^CONFIG_LOCALVERSION="-\(.*\)"/\1/p' "arch/arm64/configs/${DEFCONFIG}")
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            version="$GITHUB_REF_NAME"
+          else
+            version="${GITHUB_REF_NAME//\//-}-${GITHUB_SHA::7}"
+          fi
+          variant=$([ "$KSU" = true ] && echo KSUN-SUSFS || echo NoKSU)
+          echo "KERNEL_NAME=${name}" >> "$GITHUB_ENV"
+          echo "VERSION=${version}" >> "$GITHUB_ENV"
+          echo "ZIP_NAME=${name}-${version}-miatoll-${variant}" >> "$GITHUB_ENV"
+          echo "${name} ${version} (${variant})"
 
       - name: Install dependencies
         run: |
@@ -48,7 +66,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: clang
-          key: clang-${{ hashFiles('.github/workflows/build.yml') }}-${{ env.CLANG_URL }}
+          key: clang-${{ env.CLANG_URL }}
 
       - name: Download clang
         if: steps.cache-clang.outputs.cache-hit != 'true'
@@ -60,20 +78,20 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.ccache
-          key: ccache-${{ env.KSU }}-${{ github.sha }}
+          key: ccache-${{ matrix.ksu }}-${{ github.sha }}
           restore-keys: |
-            ccache-${{ env.KSU }}-
+            ccache-${{ matrix.ksu }}-
             ccache-
 
       - name: Set up KernelSU-Next
-        if: env.KSU == 'true'
+        if: matrix.ksu
         run: |
           # drivers/kernelsu is a symlink to ../KernelSU/kernel; the Makefile and Kconfig entries are already in tree
           git clone --depth 1 -b "$KSU_BRANCH" "$KSU_REPO" KernelSU
           echo "KernelSU-Next: $(git -C KernelSU log -1 --format='%h %s')"
 
       - name: Drop KernelSU from config
-        if: env.KSU != 'true'
+        if: ${{ !matrix.ksu }}
         run: |
           # drivers/kernelsu only exists after the KernelSU clone, and 4.14 Kconfig
           # has no optional source, so unhook it as well
@@ -87,11 +105,12 @@ jobs:
           export ARCH=arm64 SUBARCH=arm64
           ccache -M 3G
           # LLVM_IAS=1 makes clang use its own assembler; LTO still falls back to
-          # GNU gold unless ld.lld and the llvm tools are named explicitly
+          # GNU gold unless ld.lld and the llvm tools are named explicitly.
+          # LOCALVERSION is appended to CONFIG_LOCALVERSION: 4.14.356-<name>-<version>
           MAKE_ARGS=(O=out LLVM=1 LLVM_IAS=1 CC="ccache clang" LD=ld.lld
             AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip
             CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu-
-            CROSS_COMPILE_ARM32=arm-linux-gnueabi-)
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- LOCALVERSION="-${VERSION}")
           make "${MAKE_ARGS[@]}" "${DEFCONFIG}"
           make -j"$(nproc --all)" "${MAKE_ARGS[@]}" \
             Image.gz dtbo.img dtb.img 2>&1 | tee build.log
@@ -103,57 +122,72 @@ jobs:
           fi
           exit "$rc"
 
-      - name: Check config
+      - name: Check build
         run: |
-          grep -E 'CONFIG_LOCALVERSION=|CONFIG_MEMCG=|CONFIG_PSI=|CONFIG_KSU=|CONFIG_KSU_MANUAL_HOOK=|CONFIG_KSU_SUSFS=' out/.config || true
+          cat out/include/config/kernel.release
+          grep -E 'CONFIG_MEMCG=|CONFIG_PSI=|CONFIG_KSU=|CONFIG_KSU_SUSFS=' out/.config || true
           ccache -s
 
       - name: Upload build log
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: build-log
+          name: build-log-${{ matrix.ksu && 'ksu' || 'noksu' }}
           path: build.log
 
       - name: Package AnyKernel3
-        id: pack
         run: |
           git clone -q --depth 1 -b miatoll https://github.com/RapliVx/AnyKernel3 AnyKernel3
-          rm -rf AnyKernel3/.git AnyKernel3/.github
-          # name, version, banner and device list are hardcoded in the repo:
-          # CONFIG_LOCALVERSION in the defconfig and the anykernel/ folder
+          rm -rf AnyKernel3/.git AnyKernel3/.github AnyKernel3/README.md
+          # banner, kernel string and device list are hardcoded in anykernel/
           cp anykernel/anykernel.sh anykernel/banner AnyKernel3/
-          version=$(sed -n 's/^CONFIG_LOCALVERSION="-\(.*\)"/\1/p' out/.config)
           root=$([ "$KSU" = true ] && echo "KernelSU-Next + SUSFS" || echo "none (stock)")
-          sed -i -e "s/@VERSION@/${version}/" -e "s/@ROOT@/${root}/" AnyKernel3/banner
+          sed -i -e "s/@VERSION@/${KERNEL_NAME} ${VERSION}/" -e "s/@ROOT@/${root}/" AnyKernel3/banner
           cp out/arch/arm64/boot/Image.gz AnyKernel3/
           cp out/arch/arm64/boot/dtbo.img AnyKernel3/
           # AnyKernel3 replaces the boot dtb only when the file is named "dtb"
           cp out/arch/arm64/boot/dtb.img AnyKernel3/dtb
-          variant=$([ "$KSU" = true ] && echo KSUN-SUSFS || echo NoKSU)
-          zip_name="${version}-miatoll-${variant}-$(date +%Y%m%d)-${GITHUB_SHA::7}.zip"
-          rm -f AnyKernel3/README.md
-          (cd AnyKernel3 && zip -r9 "../${zip_name}" .)
-          echo "zip=${zip_name}" >> "$GITHUB_OUTPUT"
-          echo "name=${zip_name%.zip}" >> "$GITHUB_OUTPUT"
-          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          (cd AnyKernel3 && zip -r9 "../${ZIP_NAME}.zip" .)
 
       # GitHub always wraps an artifact in a zip, so upload the AnyKernel3 folder itself:
       # the downloaded artifact is then the flashable zip (a zip inside a zip fails in recovery)
       - name: Upload flashable zip
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.pack.outputs.name }}
+          name: ${{ env.ZIP_NAME }}
           path: AnyKernel3/
           include-hidden-files: true
 
-      - name: Release
-        if: inputs.release
+      - name: Upload zip for release
+        if: github.ref_type == 'tag'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.ksu && 'ksu' || 'noksu' }}
+          path: ${{ env.ZIP_NAME }}.zip
+          compression-level: 0
+
+  release:
+    name: Release
+    needs: build
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Collect zips
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+
+      - name: Publish
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: "${{ steps.pack.outputs.version }}"
-          name: "${{ steps.pack.outputs.version }}"
-          files: ${{ steps.pack.outputs.zip }}
+          tag_name: ${{ github.ref_name }}
+          name: LazyExec ${{ github.ref_name }}
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          files: "*.zip"
           body: |
             Device: Redmi Note 9 Pro / Note 9S / Poco M2 Pro / Note 9 Pro Max (miatoll)
-            KernelSU-Next: ${{ env.KSU == 'true' && format('{0} @ {1}', env.KSU_REPO, env.KSU_BRANCH) || 'not included' }}
+            - KSUN-SUSFS: KernelSU-Next + SUSFS v2.3.0 (${{ env.KSU_REPO }} @ ${{ env.KSU_BRANCH }})
+            - NoKSU: no root

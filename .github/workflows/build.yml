@@ -4,27 +4,12 @@ on:
   workflow_dispatch:
     inputs:
       ksu:
-        description: "Build with KernelSU-Next + SUSFS"
+        description: "KernelSU-Next + SUSFS"
         required: true
         type: boolean
         default: true
-      ksu_repo:
-        description: "KernelSU-Next repository"
-        required: true
-        type: string
-        default: "https://github.com/sidex15/KernelSU-Next"
-      ksu_branch:
-        description: "KernelSU-Next branch (non-GKI + SUSFS v2)"
-        required: true
-        type: string
-        default: "legacy-susfs-v2"
-      clang_url:
-        description: "Clang toolchain (.tar.gz)"
-        required: true
-        type: string
-        default: "https://github.com/topnotchfreaks/clang/releases/download/v1.0.0/clang-r547379.tar.gz"
       release:
-        description: "Publish a GitHub release"
+        description: "Publish release"
         required: true
         type: boolean
         default: false
@@ -32,9 +17,9 @@ on:
 env:
   DEFCONFIG: "vendor/xiaomi/miatoll_defconfig"
   KSU: ${{ inputs.ksu }}
-  KSU_REPO: ${{ inputs.ksu_repo || 'https://github.com/sidex15/KernelSU-Next' }}
-  KSU_BRANCH: ${{ inputs.ksu_branch || 'legacy-susfs-v2' }}
-  CLANG_URL: ${{ inputs.clang_url || 'https://github.com/topnotchfreaks/clang/releases/download/v1.0.0/clang-r547379.tar.gz' }}
+  KSU_REPO: "https://github.com/sidex15/KernelSU-Next"
+  KSU_BRANCH: "legacy-susfs-v2"
+  CLANG_URL: "https://github.com/topnotchfreaks/clang/releases/download/v1.0.0/clang-r547379.tar.gz"
   KBUILD_BUILD_USER: ${{ github.repository_owner }}
   KBUILD_BUILD_HOST: "github-actions"
 

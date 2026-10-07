@@ -143,15 +143,19 @@ jobs:
           cp out/arch/arm64/boot/dtb.img AnyKernel3/dtb
           variant=$([ "$KSU" = true ] && echo KSUN-SUSFS || echo Stock)
           zip_name="${KERNEL_NAME}-miatoll-${variant}-$(date +%Y%m%d)-${GITHUB_SHA::7}.zip"
-          (cd AnyKernel3 && zip -r9 "../${zip_name}" . -x README.md)
+          rm -f AnyKernel3/README.md
+          (cd AnyKernel3 && zip -r9 "../${zip_name}" .)
           echo "zip=${zip_name}" >> "$GITHUB_OUTPUT"
+          echo "name=${zip_name%.zip}" >> "$GITHUB_OUTPUT"
 
-      - name: Upload zip
+      # GitHub always wraps an artifact in a zip, so upload the AnyKernel3 folder itself:
+      # the downloaded artifact is then the flashable zip (a zip inside a zip fails in recovery)
+      - name: Upload flashable zip
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.pack.outputs.zip }}
-          path: ${{ steps.pack.outputs.zip }}
-          compression-level: 0
+          name: ${{ steps.pack.outputs.name }}
+          path: AnyKernel3/
+          include-hidden-files: true
 
       - name: Release
         if: inputs.release

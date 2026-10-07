@@ -137,6 +137,20 @@ jobs:
           git clone -q --depth 1 -b miatoll https://github.com/RapliVx/AnyKernel3 AnyKernel3
           rm -rf AnyKernel3/.git AnyKernel3/.github
           sed -i "s/^kernel.string=.*/kernel.string=${KERNEL_NAME} Kernel for miatoll/" AnyKernel3/anykernel.sh
+          # replace the upstream AnyKernel3 banner (shown by recovery while flashing)
+          cat > AnyKernel3/banner <<'EOF'
+              __                 ____            
+             / /  ___ ____ __ __/ __/_ _____ ____
+            / /__/ _ `/_ // // / _/ \ \ / -_) __/
+           /____/\_,_//__/\_, /___//_\_\\__/\__/ 
+                         /___/                   
+          EOF
+          {
+            echo
+            echo "- ${KERNEL_NAME} for miatoll, by xd (iput-object)"
+            [ "$KSU" = true ] && echo "- KernelSU-Next + SUSFS v2.3.0"
+            echo "- Build: ${GITHUB_SHA::7}, $(date -u +%Y-%m-%d)"
+          } >> AnyKernel3/banner
           cp out/arch/arm64/boot/Image.gz AnyKernel3/
           cp out/arch/arm64/boot/dtbo.img AnyKernel3/
           # AnyKernel3 replaces the boot dtb only when the file is named "dtb"

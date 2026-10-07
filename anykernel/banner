@@ -10,5 +10,5 @@
 
   * version : @VERSION@
   * device  : miatoll (sm6250)
-  * root    : KernelSU-Next + SUSFS
+  * root    : @ROOT@
   * author  : xd (iput-object)

@@ -40,7 +40,7 @@ env:
 
 jobs:
   build:
-    name: Build (${{ inputs.ksu && 'KSUN-SUSFS' || 'Stock' }})
+    name: Build (${{ inputs.ksu && 'KSUN-SUSFS' || 'NoKSU' }})
     runs-on: ubuntu-22.04
     permissions:
       contents: write
@@ -89,7 +89,12 @@ jobs:
 
       - name: Drop KernelSU from config
         if: env.KSU != 'true'
-        run: sed -i '/CONFIG_KSU/d' "arch/arm64/configs/${DEFCONFIG}"
+        run: |
+          # drivers/kernelsu only exists after the KernelSU clone, and 4.14 Kconfig
+          # has no optional source, so unhook it as well
+          sed -i '/CONFIG_KSU/d' "arch/arm64/configs/${DEFCONFIG}"
+          sed -i '/drivers\/kernelsu\/Kconfig/d' drivers/Kconfig
+          sed -i '/kernelsu\//d' drivers/Makefile
 
       - name: Build
         run: |
@@ -134,12 +139,13 @@ jobs:
           # CONFIG_LOCALVERSION in the defconfig and the anykernel/ folder
           cp anykernel/anykernel.sh anykernel/banner AnyKernel3/
           version=$(sed -n 's/^CONFIG_LOCALVERSION="-\(.*\)"/\1/p' out/.config)
-          sed -i "s/@VERSION@/${version}/" AnyKernel3/banner
+          root=$([ "$KSU" = true ] && echo "KernelSU-Next + SUSFS" || echo "none (stock)")
+          sed -i -e "s/@VERSION@/${version}/" -e "s/@ROOT@/${root}/" AnyKernel3/banner
           cp out/arch/arm64/boot/Image.gz AnyKernel3/
           cp out/arch/arm64/boot/dtbo.img AnyKernel3/
           # AnyKernel3 replaces the boot dtb only when the file is named "dtb"
           cp out/arch/arm64/boot/dtb.img AnyKernel3/dtb
-          variant=$([ "$KSU" = true ] && echo KSUN-SUSFS || echo Stock)
+          variant=$([ "$KSU" = true ] && echo KSUN-SUSFS || echo NoKSU)
           zip_name="${version}-miatoll-${variant}-$(date +%Y%m%d)-${GITHUB_SHA::7}.zip"
           rm -f AnyKernel3/README.md
           (cd AnyKernel3 && zip -r9 "../${zip_name}" .)

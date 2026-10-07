@@ -48,10 +48,11 @@ jobs:
           else
             version="${GITHUB_REF_NAME//\//-}-${GITHUB_SHA::7}"
           fi
-          variant=$([ "$KSU" = true ] && echo KSUN-SUSFS || echo NoKSU)
+          variant=$([ "$KSU" = true ] && echo KSU || echo NoKSU)
+          # zip name: name-version-device-type-date
           echo "KERNEL_NAME=${name}" >> "$GITHUB_ENV"
           echo "VERSION=${version}" >> "$GITHUB_ENV"
-          echo "ZIP_NAME=${name}-${version}-miatoll-${variant}" >> "$GITHUB_ENV"
+          echo "ZIP_NAME=${name}-${version}-miatoll-${variant}-$(date -u +%Y%m%d)" >> "$GITHUB_ENV"
           echo "${name} ${version} (${variant})"
 
       - name: Install dependencies
@@ -189,5 +190,5 @@ jobs:
           files: "*.zip"
           body: |
             Device: Redmi Note 9 Pro / Note 9S / Poco M2 Pro / Note 9 Pro Max (miatoll)
-            - KSUN-SUSFS: KernelSU-Next + SUSFS v2.3.0 (${{ env.KSU_REPO }} @ ${{ env.KSU_BRANCH }})
+            - KSU: KernelSU-Next + SUSFS v2.3.0 (${{ env.KSU_REPO }} @ ${{ env.KSU_BRANCH }})
             - NoKSU: no root

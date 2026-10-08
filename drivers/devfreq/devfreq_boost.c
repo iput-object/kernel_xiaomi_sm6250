@@ -5,6 +5,7 @@
 
 #define pr_fmt(fmt) "devfreq_boost: " fmt
 
+#include <linux/moduleparam.h>
 #include <linux/devfreq_boost.h>
 #include <linux/input.h>
 #include <linux/kthread.h>
@@ -48,6 +49,10 @@ static void devfreq_max_unboost(struct work_struct *work);
 	.boost_freq = freq							\
 }
 
+/* LazyExec: off by default; echo 1 > /sys/module/devfreq_boost/parameters/enabled */
+static bool enabled __read_mostly;
+module_param(enabled, bool, 0644);
+
 static struct df_boost_drv df_boost_drv_g __read_mostly = {
 	BOOST_DEV_INIT(df_boost_drv_g, DEVFREQ_CPU_LLCC_DDR_BW,
 		       CONFIG_DEVFREQ_CPU_LLCC_DDR_BW_BOOST_FREQ)
@@ -55,7 +60,8 @@ static struct df_boost_drv df_boost_drv_g __read_mostly = {
 
 static void __devfreq_boost_kick(struct boost_dev *b)
 {
-	if (!READ_ONCE(b->df) || test_bit(SCREEN_OFF, &b->state))
+	if (!READ_ONCE(enabled) || !READ_ONCE(b->df) ||
+	    test_bit(SCREEN_OFF, &b->state))
 		return;
 
 	set_bit(INPUT_BOOST, &b->state);
@@ -79,7 +85,8 @@ static void __devfreq_boost_kick_max(struct boost_dev *b,
 {
 	unsigned long boost_jiffies, curr_expires, new_expires;
 
-	if (!READ_ONCE(b->df) || test_bit(SCREEN_OFF, &b->state))
+	if (!READ_ONCE(enabled) || !READ_ONCE(b->df) ||
+	    test_bit(SCREEN_OFF, &b->state))
 		return;
 
 	boost_jiffies = msecs_to_jiffies(duration_ms);

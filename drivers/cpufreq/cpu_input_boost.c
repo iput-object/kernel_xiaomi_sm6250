@@ -5,6 +5,7 @@
 
 #define pr_fmt(fmt) "cpu_input_boost: " fmt
 
+#include <linux/moduleparam.h>
 #include <linux/cpu.h>
 #include <linux/cpufreq.h>
 #include <linux/input.h>
@@ -34,6 +35,10 @@ struct boost_drv {
 };
 
 static struct boost_drv *boost_drv_g __read_mostly;
+
+/* LazyExec: off by default; echo 1 > /sys/module/cpu_input_boost/parameters/enabled */
+static bool enabled __read_mostly;
+module_param(enabled, bool, 0644);
 
 static u32 get_input_boost_freq(struct cpufreq_policy *policy)
 {
@@ -89,7 +94,7 @@ static void update_online_cpu_policy(void)
 
 static void __cpu_input_boost_kick(struct boost_drv *b)
 {
-	if (get_boost_state(b) & SCREEN_OFF)
+	if (!READ_ONCE(enabled) || get_boost_state(b) & SCREEN_OFF)
 		return;
 
 	set_boost_bit(b, INPUT_BOOST);
@@ -114,7 +119,7 @@ static void __cpu_input_boost_kick_max(struct boost_drv *b,
 	unsigned long boost_jiffies = msecs_to_jiffies(duration_ms);
 	unsigned long curr_expires, new_expires;
 
-	if (get_boost_state(b) & SCREEN_OFF)
+	if (!READ_ONCE(enabled) || get_boost_state(b) & SCREEN_OFF)
 		return;
 
 	do {

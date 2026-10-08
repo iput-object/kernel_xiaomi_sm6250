@@ -188,7 +188,6 @@ vmlinux_link()
 gen_btf()
 {
 	local pahole_ver
-	local pahole_flags=
 
 	if ! [ -x "$(command -v ${PAHOLE})" ]; then
 		info "BTF" "${1}: pahole (${PAHOLE}) is not available"
@@ -201,15 +200,9 @@ gen_btf()
 		return 1
 	fi
 
-	# pahole 1.24+ emits BTF_KIND_ENUM64, which this kernel's BTF parser
-	# rejects (from stable 5.10 scripts/pahole-flags.sh)
-	if [ "${pahole_ver}" -ge "124" ]; then
-		pahole_flags="--skip_encoding_btf_enum64"
-	fi
-
 	info "BTF" ${2}
 	vmlinux_link ${1}
-	LLVM_OBJCOPY=${OBJCOPY} ${PAHOLE} -J ${pahole_flags} ${1}
+	LLVM_OBJCOPY=${OBJCOPY} ${PAHOLE} -J ${1}
 
 	# Create ${2} which contains just .BTF section but no symbols. Add
 	# SHF_ALLOC because .BTF will be part of the vmlinux image. --strip-all

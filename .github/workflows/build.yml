@@ -77,6 +77,17 @@ jobs:
           mkdir -p clang
           curl -LSs "$CLANG_URL" | tar -xzf - -C clang
 
+      - name: Add swap
+        run: |
+          # pahole converting the LTO vmlinux DWARF to BTF does not fit in the runner's RAM
+          sudo swapoff -a
+          sudo rm -f /mnt/swapfile
+          sudo fallocate -l 16G /mnt/swapfile
+          sudo chmod 600 /mnt/swapfile
+          sudo mkswap /mnt/swapfile >/dev/null
+          sudo swapon /mnt/swapfile
+          free -h
+
       - name: Build resolve_btfids
         run: |
           # CONFIG_DEBUG_INFO_BTF runs resolve_btfids at link time; 4.14 tools/ is too old
@@ -143,6 +154,10 @@ jobs:
           # BTF must be in the image for CO-RE programs (timeInState)
           "$GITHUB_WORKSPACE/clang/bin/llvm-readelf" -S out/vmlinux | grep -E '\.BTF' || { echo "::error::vmlinux has no .BTF section"; exit 1; }
           ccache -s
+
+      - name: Show OOM kills
+        if: failure()
+        run: sudo dmesg | grep -iE 'out of memory|killed process|oom' | tail -5 || true
 
       - name: Upload build log
         if: failure()

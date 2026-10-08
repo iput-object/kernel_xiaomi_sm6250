@@ -41,4 +41,14 @@ split_boot;
 
 flash_boot;
 flash_dtbo;
+
+## cache cleanup: everything here is rebuilt on the next boot
+# /cache (recovery logs and commands are kept), dalvik-cache, and the
+# framework's parsed package cache, so nothing from the previous kernel's
+# boot is reused
+ui_print " " "Cleaning cache, dalvik-cache and package cache...";
+for f in /cache/* /cache/.[!.]*; do
+  [ -e "$f" ] && [ "${f##*/}" != recovery ] && rm -rf "$f";
+done;
+rm -rf /data/dalvik-cache/* /data/system/package_cache/* 2>/dev/null;
 ## end boot install

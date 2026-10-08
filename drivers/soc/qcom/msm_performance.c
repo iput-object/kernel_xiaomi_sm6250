@@ -274,6 +274,11 @@ static int perf_adjust_notify(struct notifier_block *nb, unsigned long val,
 
 static struct notifier_block perf_cpufreq_nb = {
 	.notifier_call = perf_adjust_notify,
+	/*
+	 * Run after cpu_input_boost, which resets policy->min when it is not
+	 * boosting; otherwise perf HAL min freq requests never take effect.
+	 */
+	.priority = -1,
 };
 
 static int hotplug_notify(unsigned int cpu)

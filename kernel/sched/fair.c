@@ -205,10 +205,13 @@ static inline u64 scale_slice(u64 delta, struct sched_entity *se) {
 }
 
 static void update_burst_score(struct sched_entity *se) {
+	struct task_struct *p;
+	u8 prio, prev_prio;
+
 	if (!entity_is_task(se)) return;
-	struct task_struct *p = task_of(se);
-	u8 prio = p->static_prio - MAX_RT_PRIO;
-	u8 prev_prio = min(39, prio + se->burst_score);
+	p = task_of(se);
+	prio = p->static_prio - MAX_RT_PRIO;
+	prev_prio = min(39, prio + se->burst_score);
 
 	se->burst_score = se->burst_penalty >> 2;
 
@@ -5434,13 +5437,15 @@ enqueue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 		cpufreq_update_util(rq, SCHED_CPUFREQ_IOWAIT);
 
 #ifdef CONFIG_SCHED_BORE
-	int task_sleep = flags & DEQUEUE_SLEEP;
-	
-	if (task_sleep) {
-		cfs_rq = cfs_rq_of(se);
-		if (cfs_rq->curr == se)
-			update_curr(cfs_rq);
-		restart_burst(se);
+	{
+		int task_sleep = flags & DEQUEUE_SLEEP;
+
+		if (task_sleep) {
+			cfs_rq = cfs_rq_of(se);
+			if (cfs_rq->curr == se)
+				update_curr(cfs_rq);
+			restart_burst(se);
+		}
 	}
 #endif // CONFIG_SCHED_BORE
 

@@ -737,8 +737,6 @@ EXPORT_SYMBOL_GPL(sk_psock_tls_strp_read);
 static void sk_psock_verdict_apply(struct sk_psock *psock,
 				   struct sk_buff *skb, int verdict)
 {
-	struct sock *sk_other;
-
 	switch (verdict) {
 	case __SK_REDIRECT:
 		sk_psock_skb_redirect(psock, skb);
@@ -746,7 +744,6 @@ static void sk_psock_verdict_apply(struct sk_psock *psock,
 	case __SK_DROP:
 		/* fall-through */
 	default:
-out_free:
 		kfree_skb(skb);
 	}
 }

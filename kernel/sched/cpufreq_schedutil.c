@@ -21,7 +21,6 @@
 
 #define SUGOV_KTHREAD_PRIORITY	50
 
-#define DEFAULT_HISPEED_LOAD 90
 #define TARGET_LOAD 80
 
 static inline bool conservative_pl(void)
@@ -178,7 +177,6 @@ static void sugov_update_commit(struct sugov_policy *sg_policy, u64 time,
 				unsigned int next_freq)
 {
 	struct cpufreq_policy *policy = sg_policy->policy;
-	unsigned int cpu;
 
 	if (sg_policy->next_freq == next_freq)
 		return;
@@ -349,7 +347,7 @@ static inline bool sugov_cpu_is_busy(struct sugov_cpu *sg_cpu) { return false; }
 
 #define NL_RATIO 75
 #define DEFAULT_HISPEED_LOAD CONFIG_SCHEDUTIL_DEFAULT_HISPEED_LOAD
-static void sugov_walt_adjust(struct sugov_cpu *sg_cpu, unsigned long *util,
+static void __maybe_unused sugov_walt_adjust(struct sugov_cpu *sg_cpu, unsigned long *util,
 			      unsigned long *max)
 {
 	struct sugov_policy *sg_policy = sg_cpu->sg_policy;

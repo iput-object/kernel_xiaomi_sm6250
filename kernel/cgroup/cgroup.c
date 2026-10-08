@@ -6250,6 +6250,8 @@ void cgroup_sk_clone(struct sock_cgroup_data *skcd)
 {
 	/* Socket clone path */
 	if (skcd->val) {
+		struct cgroup *cgrp;
+
 		if (skcd->no_refcnt)
 			return;
 		/*
@@ -6257,7 +6259,7 @@ void cgroup_sk_clone(struct sock_cgroup_data *skcd)
 		 * cgroup and the cgroup might have already been rmdir'd.
 		 * Don't use cgroup_get_live().
 		 */
-		struct cgroup *cgrp = sock_cgroup_ptr(skcd);
+		cgrp = sock_cgroup_ptr(skcd);
 		cgroup_get(cgrp);
 		cgroup_bpf_get(cgrp);
 	}

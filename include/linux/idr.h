@@ -304,37 +304,6 @@ static inline int ida_alloc_max(struct ida *ida, unsigned int max, gfp_t gfp)
 	return ida_alloc_range(ida, 0, max, gfp);
 }
 
-/*
- * ida_alloc*() / ida_free() as in 4.19+, built on ida_simple_get(), whose
- * end is exclusive and 0 means no limit. Do not mix these with
- * ida_get_new_above() on the same ida: they take different locks.
- */
-static inline int ida_alloc_range(struct ida *ida, unsigned int min,
-				  unsigned int max, gfp_t gfp)
-{
-	return ida_simple_get(ida, min, max >= INT_MAX ? 0 : max + 1, gfp);
-}
-
-static inline int ida_alloc(struct ida *ida, gfp_t gfp)
-{
-	return ida_alloc_range(ida, 0, ~0, gfp);
-}
-
-static inline int ida_alloc_min(struct ida *ida, unsigned int min, gfp_t gfp)
-{
-	return ida_alloc_range(ida, min, ~0, gfp);
-}
-
-static inline int ida_alloc_max(struct ida *ida, unsigned int max, gfp_t gfp)
-{
-	return ida_alloc_range(ida, 0, max, gfp);
-}
-
-static inline void ida_free(struct ida *ida, unsigned int id)
-{
-	ida_simple_remove(ida, id);
-}
-
 static inline void ida_init(struct ida *ida)
 {
 	INIT_RADIX_TREE(&ida->ida_rt, IDR_RT_MARKER | GFP_NOWAIT);

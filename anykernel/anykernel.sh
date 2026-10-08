@@ -51,4 +51,6 @@ for f in /cache/* /cache/.[!.]*; do
   [ -e "$f" ] && [ "${f##*/}" != recovery ] && rm -rf "$f";
 done;
 rm -rf /data/dalvik-cache/* /data/system/package_cache/* 2>/dev/null;
+
+ui_print " " "First boot may take a few minutes while caches are rebuilt.";
 ## end boot install

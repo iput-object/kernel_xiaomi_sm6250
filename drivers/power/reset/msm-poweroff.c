@@ -67,6 +67,10 @@ static void scm_disable_sdi(void);
  */
 static int download_mode = 1;
 static int in_panic;
+
+/* Reboot into recovery after a kernel panic, so the panic log can be read */
+static bool panic_to_recovery = true;
+module_param(panic_to_recovery, bool, 0644);
 static bool force_warm_reboot;
 
 #ifdef CONFIG_QCOM_DLOAD_MODE
@@ -288,6 +292,9 @@ static void halt_spmi_pmic_arbiter(void)
 static void msm_restart_prepare(const char *cmd)
 {
 	bool need_warm_reset = false;
+
+	if (in_panic && panic_to_recovery && (cmd == NULL || cmd[0] == '\0'))
+		cmd = "recovery";
 #ifdef CONFIG_QCOM_DLOAD_MODE
 	/* Write download mode flags if we're panic'ing
 	 * Write download mode flags if restart_mode says so

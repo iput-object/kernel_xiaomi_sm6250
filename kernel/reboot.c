@@ -278,7 +278,7 @@ static DEFINE_MUTEX(reboot_mutex);
  * reboot doesn't sync: do that yourself before calling this.
  */
 
-#if defined(CONFIG_KSU) && !defined(CONFIG_KSU_TAMPER_SYSCALL_TABLE)
+#ifdef CONFIG_KSU_SUSFS
 extern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);
 #endif
 
@@ -289,9 +289,21 @@ SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,
 	char buffer[256];
 	int ret = 0;
 
-#if defined(CONFIG_KSU) && !defined(CONFIG_KSU_TAMPER_SYSCALL_TABLE)
-	ksu_handle_sys_reboot(magic1, magic2, cmd, &arg);
+#ifdef CONFIG_KSU_SUSFS
+	/*
+	 * LazyExec: a real reboot (LINUX_REBOOT_MAGIC1) never goes to KernelSU,
+	 * so the early return below can only swallow KernelSU's own supercalls.
+	 */
+	if (magic1 == LINUX_REBOOT_MAGIC1)
+		goto orig_flow;
+	ret = ksu_handle_sys_reboot(magic1, magic2, cmd, &arg);
+	if (ret) {
+		goto orig_flow;
+	}
+	return ret;
+orig_flow:
 #endif
+
 	/* We only trust the superuser with rebooting the system. */
 	if (!ns_capable(pid_ns->user_ns, CAP_SYS_BOOT))
 		return -EPERM;

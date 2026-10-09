@@ -19,11 +19,24 @@
 #include <linux/compat.h>
 #ifdef CONFIG_KSU_SUSFS
 #include <linux/susfs_def.h>
-#include <linux/version.h>
 #endif
 
 #include <linux/uaccess.h>
 #include <asm/unistd.h>
+
+#include "internal.h"
+
+#ifdef CONFIG_KSU_SUSFS
+extern struct static_key_true ksu_is_init_rc_hook_enabled;
+extern void ksu_handle_vfs_fstat(int fd, loff_t *kstat_size_ptr);
+extern struct static_key_true ksu_su_compat_enabled;
+extern bool __ksu_is_allow_uid_for_current(uid_t uid);
+extern int ksu_handle_stat(int *dfd, struct filename **filename, int *flags);
+#endif // #ifdef CONFIG_KSU_SUSFS
+#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
+extern bool susfs_is_inode_sus_kstat(struct inode *inode, bool *out_is_fuse);
+extern void susfs_sus_kstat_spoof_generic_fillattr(struct inode *inode, struct kstat *stat, u32 result_mask);
+#endif // #ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
 
 /**
  * generic_fillattr - Fill in the basic attributes from the inode struct
@@ -34,11 +47,6 @@
  * found on the VFS inode structure.  This is the default if no getattr inode
  * operation is supplied.
  */
-#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
-extern bool susfs_is_inode_sus_kstat(struct inode *inode, bool *out_is_fuse);
-extern void susfs_generic_fillattr_spoofer(struct inode *inode, struct kstat *stat, u32 result_mask);
-#endif
-
 void generic_fillattr(struct inode *inode, struct kstat *stat)
 {
 	stat->dev = inode->i_sb->s_dev;
@@ -86,19 +94,14 @@ int vfs_getattr_nosec(const struct path *path, struct kstat *stat,
 	query_flags &= KSTAT_QUERY_FLAGS;
 
 #ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
-	/* - SUS_KSTAT is effective for any app-uid process (uid % 100000 >= 10000),
-	 *   independent of whether the process was umounted. We only tag result_mask
-	 *   here; the actual spoofing happens after ->getattr()/generic_fillattr().
-	 * - Note: on 4.14 struct kstat has no mnt_id member and there is no STATX_MNT_ID,
-	 *   so the mnt_id spoofing that upstream does here is a no-op and omitted.
-	 */
+	/* 4.14: struct kstat has no mnt_id, so upstream's mnt_id assignments are dropped */
 	if (susfs_is_current_app_uid()) {
 		bool is_fuse = false;
-		if (susfs_is_inode_sus_kstat(inode, &is_fuse)) {
-			if (!is_fuse)
+		if (susfs_is_inode_sus_kstat(d_backing_inode(path->dentry), &is_fuse)) {
+			if (!is_fuse) {
 				stat->result_mask |= STATX_SUS_KSTAT;
-			else
-				stat->result_mask |= STATX_SUS_KSTAT_FUSE;
+			}
+			stat->result_mask |= STATX_SUS_KSTAT_FUSE;
 		}
 	}
 #endif // #ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
@@ -109,31 +112,32 @@ int vfs_getattr_nosec(const struct path *path, struct kstat *stat,
 		int err = inode->i_op->getattr(path, stat, request_mask,
 					    query_flags);
 		if (!err) {
-			if (stat->result_mask & STATX_SUS_KSTAT)
-				susfs_generic_fillattr_spoofer(inode, stat, STATX_SUS_KSTAT);
-			else if (stat->result_mask & STATX_SUS_KSTAT_FUSE)
-				susfs_generic_fillattr_spoofer(inode, stat, STATX_SUS_KSTAT_FUSE);
+			if (stat->result_mask & STATX_SUS_KSTAT) {
+				susfs_sus_kstat_spoof_generic_fillattr(inode, stat, STATX_SUS_KSTAT);
+				return err;
+			}
+			if (stat->result_mask & STATX_SUS_KSTAT_FUSE) {
+				susfs_sus_kstat_spoof_generic_fillattr(inode, stat, STATX_SUS_KSTAT_FUSE);
+				return err;
+			}
 		}
-		/* never let our internal request marks leak to userspace (stx_mask) */
-		stat->result_mask &= ~(STATX_SUS_KSTAT | STATX_SUS_KSTAT_FUSE);
 		return err;
 	}
 	if (stat->result_mask & STATX_SUS_KSTAT) {
 		generic_fillattr(inode, stat);
-		susfs_generic_fillattr_spoofer(inode, stat, STATX_SUS_KSTAT);
-		stat->result_mask &= ~(STATX_SUS_KSTAT | STATX_SUS_KSTAT_FUSE);
+		susfs_sus_kstat_spoof_generic_fillattr(inode, stat, STATX_SUS_KSTAT);
 		return 0;
 	}
 	if (stat->result_mask & STATX_SUS_KSTAT_FUSE) {
 		generic_fillattr(inode, stat);
-		susfs_generic_fillattr_spoofer(inode, stat, STATX_SUS_KSTAT_FUSE);
-		stat->result_mask &= ~(STATX_SUS_KSTAT | STATX_SUS_KSTAT_FUSE);
+		susfs_sus_kstat_spoof_generic_fillattr(inode, stat, STATX_SUS_KSTAT_FUSE);
 		return 0;
 	}
 #else
 		return inode->i_op->getattr(path, stat, request_mask,
 					    query_flags);
-#endif
+#endif // #ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
+
 	generic_fillattr(inode, stat);
 	return 0;
 }
@@ -197,6 +201,10 @@ int vfs_statx_fd(unsigned int fd, struct kstat *stat,
 	if (f.file) {
 		error = vfs_getattr(&f.file->f_path, stat,
 				    request_mask, query_flags);
+#ifdef CONFIG_KSU_SUSFS
+		if (static_branch_unlikely(&ksu_is_init_rc_hook_enabled))
+			ksu_handle_vfs_fstat(fd, &stat->size);
+#endif // #ifdef CONFIG_KSU_SUSFS
 		fdput(f);
 	}
 	return error;
@@ -224,6 +232,9 @@ int vfs_statx(int dfd, const char __user *filename, int flags,
 	struct path path;
 	int error = -EINVAL;
 	unsigned int lookup_flags = LOOKUP_FOLLOW | LOOKUP_AUTOMOUNT;
+#ifdef CONFIG_KSU_SUSFS
+	struct filename *fname = NULL;
+#endif
 
 	if ((flags & ~(AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT |
 		       AT_EMPTY_PATH | KSTAT_QUERY_FLAGS)) != 0)
@@ -237,11 +248,31 @@ int vfs_statx(int dfd, const char __user *filename, int flags,
 		lookup_flags |= LOOKUP_EMPTY;
 
 retry:
+#ifdef CONFIG_KSU_SUSFS
+	fname = getname_flags(filename, lookup_flags, NULL);
+
+	if (likely(susfs_is_current_proc_no_su()))
+		goto orig_flow;
+
+	if (static_branch_likely(&ksu_su_compat_enabled)) {
+		if (unlikely(__ksu_is_allow_uid_for_current(current_uid().val)))
+			ksu_handle_stat(&dfd, &fname, &flags);
+	}
+
+orig_flow:
+	error = filename_lookup(dfd, fname, lookup_flags, &path, NULL);
+	// no putname(fname) here as filename_lookup() has it done for us already;
+#else
 	error = user_path_at(dfd, filename, lookup_flags, &path);
+#endif // #ifdef CONFIG_KSU_SUSFS
 	if (error)
 		goto out;
 
 	error = vfs_getattr(&path, stat, request_mask, flags);
+#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
+	/* 4.14: no stat->mnt_id / STATX_MNT_ID, only drop the internal marks */
+	stat->result_mask &= ~(STATX_SUS_KSTAT_FUSE | STATX_SUS_KSTAT);
+#endif // #ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
 	path_put(&path);
 	if (retry_estale(error, lookup_flags)) {
 		lookup_flags |= LOOKUP_REVAL;
@@ -408,12 +439,6 @@ SYSCALL_DEFINE2(newlstat, const char __user *, filename,
 	return cp_new_stat(&stat, statbuf);
 }
 
-#if defined(CONFIG_KSU) && !defined(CONFIG_KSU_TAMPER_SYSCALL_TABLE)
-__attribute__((hot)) 
-extern int ksu_handle_stat(int *dfd, const char __user **filename_user,
-				int *flags);
-#endif
-
 #if !defined(__ARCH_WANT_STAT64) || defined(__ARCH_WANT_SYS_NEWFSTATAT)
 SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,
 		struct stat __user *, statbuf, int, flag)
@@ -421,9 +446,6 @@ SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,
 	struct kstat stat;
 	int error;
 
-#if defined(CONFIG_KSU) && !defined(CONFIG_KSU_TAMPER_SYSCALL_TABLE)
-	ksu_handle_stat(&dfd, &filename, &flag);
-#endif
 	error = vfs_fstatat(dfd, filename, &stat, flag);
 	if (error)
 		return error;
@@ -568,9 +590,6 @@ SYSCALL_DEFINE4(fstatat64, int, dfd, const char __user *, filename,
 	struct kstat stat;
 	int error;
 
-#if defined(CONFIG_KSU) && !defined(CONFIG_KSU_TAMPER_SYSCALL_TABLE)
-	ksu_handle_stat(&dfd, &filename, &flag); 
-#endif
 	error = vfs_fstatat(dfd, filename, &stat, flag);
 	if (error)
 		return error;

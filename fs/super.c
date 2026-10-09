@@ -36,15 +36,10 @@
 #include <linux/fsnotify.h>
 #include <linux/lockdep.h>
 #include <linux/user_namespace.h>
-#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+#ifdef CONFIG_KSU_SUSFS
 #include <linux/susfs_def.h>
-#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+#endif // #ifdef CONFIG_KSU_SUSFS
 #include "internal.h"
-
-#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
-extern bool susfs_is_current_ksu_domain(void);
-extern bool susfs_is_sdcard_android_data_decrypted;
-#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
 
 static LIST_HEAD(super_blocks);
 static DEFINE_SPINLOCK(sb_lock);
@@ -976,30 +971,56 @@ static DEFINE_SPINLOCK(unnamed_dev_lock);/* protects the above */
  */
 static int unnamed_dev_start = 1;
 
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+extern bool susfs_is_current_ksu_domain(void);
+extern struct static_key_true susfs_is_sdcard_android_data_not_decrypted;
+#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+
 int get_anon_bdev(dev_t *p)
 {
 	int dev;
 	int error;
+
 #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
-	bool is_sus_dev = !READ_ONCE(susfs_is_sdcard_android_data_decrypted) &&
-			  susfs_is_current_ksu_domain();
-#endif
+	if (static_branch_unlikely(&susfs_is_sdcard_android_data_not_decrypted)) {
+		if (susfs_is_current_ksu_domain()) {
+			/*
+			 * 4.14: unnamed_dev_ida is still driven by the old ida_pre_get()/
+			 * ida_get_new_above() API under unnamed_dev_lock (see free_anon_bdev()),
+			 * so this is the equivalent of upstream's
+			 * ida_alloc_range(DEFAULT_KSU_MNT_MINOR_DEV, (1 << MINORBITS) - 1).
+			 */
+susfs_retry:
+			if (ida_pre_get(&unnamed_dev_ida, GFP_ATOMIC) == 0)
+				return -ENOMEM;
+			spin_lock(&unnamed_dev_lock);
+			error = ida_get_new_above(&unnamed_dev_ida, DEFAULT_KSU_MNT_MINOR_DEV, &dev);
+			spin_unlock(&unnamed_dev_lock);
+			if (error == -EAGAIN)
+				goto susfs_retry;
+			else if (error)
+				return -EAGAIN;
+
+			if (dev >= (1 << MINORBITS)) {
+				spin_lock(&unnamed_dev_lock);
+				ida_remove(&unnamed_dev_ida, dev);
+				spin_unlock(&unnamed_dev_lock);
+				return -EMFILE;
+			}
+
+			*p = MKDEV(0, dev);
+			return 0;
+		}
+	}
+#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
 
  retry:
 	if (ida_pre_get(&unnamed_dev_ida, GFP_ATOMIC) == 0)
 		return -ENOMEM;
 	spin_lock(&unnamed_dev_lock);
-#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
-	/* Mounts made by ksu get minor devs from their own range, so they leave no gap */
-	if (is_sus_dev) {
-		error = ida_get_new_above(&unnamed_dev_ida, DEFAULT_KSU_MNT_MINOR_DEV, &dev);
-	} else
-#endif
-	{
-		error = ida_get_new_above(&unnamed_dev_ida, unnamed_dev_start, &dev);
-		if (!error)
-			unnamed_dev_start = dev + 1;
-	}
+	error = ida_get_new_above(&unnamed_dev_ida, unnamed_dev_start, &dev);
+	if (!error)
+		unnamed_dev_start = dev + 1;
 	spin_unlock(&unnamed_dev_lock);
 	if (error == -EAGAIN)
 		/* We raced and lost with another CPU. */

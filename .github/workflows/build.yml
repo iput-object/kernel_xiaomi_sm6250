@@ -191,8 +191,9 @@ jobs:
           if [ -n "$TG_THREAD" ]; then args+=(-F message_thread_id="$TG_THREAD"); fi
           resp=$(curl -sS --retry 3 "https://api.telegram.org/bot${TG_TOKEN}/sendDocument" "${args[@]}")
           if ! printf '%s' "$resp" | grep -q '"ok":true'; then
-            echo "::error::Telegram upload failed: $(printf '%s' "$resp" | sed -n 's/.*"description":"\([^"]*\)".*/\1/p')"
-            exit 1
+            # the kernel built fine; a Telegram problem should not fail the build
+            echo "::warning::Telegram upload failed: $(printf '%s' "$resp" | sed -n 's/.*"description":"\([^"]*\)".*/\1/p')"
+            exit 0
           fi
           echo "Sent ${ZIP_NAME}.zip to Telegram"
 

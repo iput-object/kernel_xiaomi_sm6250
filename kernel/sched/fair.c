@@ -24,6 +24,7 @@
  *  Copyright (C) 2021-2024 Masahito Suzuki <firelzrd@gmail.com>
  */
 
+#include <linux/moduleparam.h>
 #include <linux/sched/mm.h>
 #include <linux/sched/topology.h>
 

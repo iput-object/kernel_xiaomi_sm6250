@@ -56,6 +56,34 @@ unsigned long cass_cpu_util(int cpu, int this_cpu, bool sync)
  */
 #define fits_capacity(cap, max)	((cap) * 1280 < (max) * 1024)
 
+/*
+ * LazyExec: the foreground app's UI/render threads sleep between frames, so
+ * their util "fits" a little core and CASS keeps waking them there (Insta's
+ * main thread ran on big cores 1-3% of the time). Without uclamp/WALT on 4.14
+ * nothing else steers them, so for top-app tasks with nice <= cass_boost_nice
+ * only CPUs with room for CASS_BOOST_UTIL count as fitting (big cores).
+ * echo -21 > /sys/module/fair/parameters/cass_boost_nice disables it.
+ */
+#define CASS_BOOST_UTIL	(SCHED_CAPACITY_SCALE / 2)
+static int cass_boost_nice __read_mostly = -10;
+module_param(cass_boost_nice, int, 0644);
+
+/* Needs RCU read lock for the task group */
+static __always_inline bool cass_task_boosted(struct task_struct *p)
+{
+#ifdef CONFIG_CGROUP_SCHED
+	struct cgroup *cgrp;
+
+	if (task_nice(p) > READ_ONCE(cass_boost_nice))
+		return false;
+
+	cgrp = task_group(p)->css.cgroup;
+	return cgrp && cgrp->kn && !strcmp(cgrp->kn->name, "top-app");
+#else
+	return false;
+#endif
+}
+
 /* Returns true if @a is a better CPU than @b */
 static __always_inline
 bool cass_cpu_better(const struct cass_cpu_cand *a,
@@ -109,7 +137,7 @@ static int cass_best_cpu(struct task_struct *p, int prev_cpu, bool sync)
 	int this_cpu = raw_smp_processor_id();
 	struct cpuidle_state *idle_state;
 	bool has_idle = false;
-	unsigned long p_util;
+	unsigned long p_util, fit_util;
 	int cidx = 0, cpu;
 
 	/* Get the utilization for this task */
@@ -120,6 +148,9 @@ static int cass_best_cpu(struct task_struct *p, int prev_cpu, bool sync)
 	 * idle_get_state().
 	 */
 	rcu_read_lock();
+	fit_util = p_util;
+	if (cass_task_boosted(p))
+		fit_util = max_t(unsigned long, fit_util, CASS_BOOST_UTIL);
 	for_each_cpu_and(cpu, &p->cpus_allowed, cpu_active_mask) {
 		/* Use the free candidate slot */
 		struct rq *rq = cpu_rq(cpu);
@@ -179,7 +210,7 @@ static int cass_best_cpu(struct task_struct *p, int prev_cpu, bool sync)
 		 * cidx still needs to be changed to the other candidate slot.
 		 */
 		if (best == curr ||
-		    cass_cpu_better(curr, best, p_util, this_cpu, prev_cpu,
+		    cass_cpu_better(curr, best, fit_util, this_cpu, prev_cpu,
 				    sync)) {
 			best = curr;
 			cidx ^= 1;

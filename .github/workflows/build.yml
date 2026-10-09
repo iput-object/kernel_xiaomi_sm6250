@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       ksu:
-        description: "KernelSU-Next + SUSFS"
+        description: "BakaSU + SUSFS"
         required: true
         type: boolean
         default: true
@@ -22,15 +22,15 @@ on:
 
 env:
   DEFCONFIG: "vendor/xiaomi/miatoll_defconfig"
-  KSU_REPO: "https://github.com/sidex15/KernelSU-Next"
-  KSU_BRANCH: "legacy-susfs-v2"
+  KSU_REPO: "https://github.com/Baka-SU/BakaSU"
+  KSU_BRANCH: "main"
   CLANG_URL: "https://github.com/topnotchfreaks/clang/releases/download/v1.0.0/clang-r547379.tar.gz"
   KBUILD_BUILD_USER: ${{ github.repository_owner }}
   KBUILD_BUILD_HOST: "github-actions"
 
 jobs:
   build:
-    name: Build (${{ matrix.ksu && 'KSUN-SUSFS' || 'NoKSU' }})
+    name: Build (${{ matrix.ksu && 'BakaSU-SUSFS' || 'NoKSU' }})
     runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
@@ -95,12 +95,14 @@ jobs:
             ccache-${{ matrix.ksu }}-
             ccache-
 
-      - name: Set up KernelSU-Next
+      - name: Set up BakaSU
         if: matrix.ksu
         run: |
           # drivers/kernelsu is a symlink to ../KernelSU/kernel; the Makefile and Kconfig entries are already in tree
-          git clone --depth 1 -b "$KSU_BRANCH" "$KSU_REPO" KernelSU
-          echo "KernelSU-Next: $(git -C KernelSU log -1 --format='%h %s')"
+          # full history (blobless): BakaSU's version code is 30000 + commit count + 700,
+          # and its Kbuild needs KernelSU/.git, so no shallow clone and no plain copy
+          git clone --filter=blob:none -b "$KSU_BRANCH" "$KSU_REPO" KernelSU
+          echo "BakaSU: $(git -C KernelSU log -1 --format='%h %s') ($(git -C KernelSU rev-list --count HEAD) commits)"
           echo "KSU_COMMIT=$(git -C KernelSU log -1 --format=%h)" >> "$GITHUB_ENV"
 
       - name: Drop KernelSU from config
@@ -154,7 +156,7 @@ jobs:
           rm -rf AnyKernel3/.git AnyKernel3/.github AnyKernel3/README.md
           # banner, kernel string and device list are hardcoded in anykernel/
           cp anykernel/anykernel.sh anykernel/banner AnyKernel3/
-          root=$([ "$KSU" = true ] && echo "KernelSU-Next + SUSFS" || echo "none (stock)")
+          root=$([ "$KSU" = true ] && echo "BakaSU + SUSFS" || echo "none (stock)")
           sed -i -e "s/@VERSION@/${KERNEL_NAME} ${VERSION}/" -e "s/@ROOT@/${root}/" AnyKernel3/banner
           cp out/arch/arm64/boot/Image.gz AnyKernel3/
           cp out/arch/arm64/boot/dtbo.img AnyKernel3/
@@ -181,7 +183,7 @@ jobs:
             echo "::notice::TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not set, skipping Telegram upload"
             exit 0
           fi
-          root=$([ "$KSU" = true ] && echo "KernelSU-Next + SUSFS (${KSU_COMMIT})" || echo "none")
+          root=$([ "$KSU" = true ] && echo "BakaSU + SUSFS (${KSU_COMMIT})" || echo "none")
           # plain text caption (no parse_mode), so commit subjects need no escaping
           caption=$(printf '%s %s\nDevice: miatoll\nRoot: %s\nKernel: %s\nCommit: %s@%s %s\n%s' \
             "$KERNEL_NAME" "$VERSION" "$root" "$(cat out/include/config/kernel.release)" \
@@ -228,5 +230,5 @@ jobs:
           files: "*.zip"
           body: |
             Device: Redmi Note 9 Pro / Note 9S / Poco M2 Pro / Note 9 Pro Max (miatoll)
-            - KSU: KernelSU-Next + SUSFS v2.3.0 (${{ env.KSU_REPO }} @ ${{ env.KSU_BRANCH }})
+            - KSU: BakaSU + SUSFS v2.3.0 (${{ env.KSU_REPO }} @ ${{ env.KSU_BRANCH }})
             - NoKSU: no root

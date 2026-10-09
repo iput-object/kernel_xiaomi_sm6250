@@ -248,6 +248,8 @@ static int cass_best_cpu(struct task_struct *p, int prev_cpu, bool sync)
 	}
 	rcu_read_unlock();
 
+	if (mask == &fit_mask && cpumask_test_cpu(best->cpu, &fit_mask))
+		WRITE_ONCE(cass_dbg_big, cass_dbg_big + 1);
 	return best->cpu;
 }
 

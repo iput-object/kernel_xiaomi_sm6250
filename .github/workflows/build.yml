@@ -1,7 +1,8 @@
 name: Build Kernel
 
 # Release: push a tag like v1.1 (stable) or v1.1-beta1 (pre-release) -> builds KSU + NoKSU and publishes
-# Test build: Run workflow on any branch -> version is <branch>-<commit>, no release
+# Test build: Run workflow on any branch -> version is <branch>-<commit> (or the version input), no release
+# Telegram: every build is sent to the chat when the TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID secrets are set
 on:
   push:
     tags:
@@ -13,6 +14,11 @@ on:
         required: true
         type: boolean
         default: true
+      version:
+        description: "Version (optional, default <branch>-<commit>)"
+        required: false
+        type: string
+        default: ""
 
 env:
   DEFCONFIG: "vendor/xiaomi/miatoll_defconfig"
@@ -40,11 +46,16 @@ jobs:
           fetch-depth: 1
 
       - name: Set version
+        env:
+          VERSION_INPUT: ${{ inputs.version }}
         run: |
           # kernel name comes from CONFIG_LOCALVERSION, the version from the tag
           name=$(sed -n 's/^CONFIG_LOCALVERSION="-\(.*\)"/\1/p' "arch/arm64/configs/${DEFCONFIG}")
           if [ "$GITHUB_REF_TYPE" = tag ]; then
             version="$GITHUB_REF_NAME"
+          elif [ -n "$VERSION_INPUT" ]; then
+            # goes into the zip name and kernel release, so keep it to one safe word
+            version=$(printf '%s' "$VERSION_INPUT" | tr -c 'A-Za-z0-9._-' '-')
           else
             version="${GITHUB_REF_NAME//\//-}-${GITHUB_SHA::7}"
           fi
@@ -90,6 +101,7 @@ jobs:
           # drivers/kernelsu is a symlink to ../KernelSU/kernel; the Makefile and Kconfig entries are already in tree
           git clone --depth 1 -b "$KSU_BRANCH" "$KSU_REPO" KernelSU
           echo "KernelSU-Next: $(git -C KernelSU log -1 --format='%h %s')"
+          echo "KSU_COMMIT=$(git -C KernelSU log -1 --format=%h)" >> "$GITHUB_ENV"
 
       - name: Drop KernelSU from config
         if: ${{ !matrix.ksu }}
@@ -158,6 +170,31 @@ jobs:
           name: ${{ env.ZIP_NAME }}
           path: AnyKernel3/
           include-hidden-files: true
+
+      - name: Upload to Telegram
+        env:
+          TG_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TG_CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TG_THREAD: ${{ secrets.TELEGRAM_THREAD_ID }}
+        run: |
+          if [ -z "$TG_TOKEN" ] || [ -z "$TG_CHAT" ]; then
+            echo "::notice::TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not set, skipping Telegram upload"
+            exit 0
+          fi
+          root=$([ "$KSU" = true ] && echo "KernelSU-Next + SUSFS (${KSU_COMMIT})" || echo "none")
+          # plain text caption (no parse_mode), so commit subjects need no escaping
+          caption=$(printf '%s %s\nDevice: miatoll\nRoot: %s\nKernel: %s\nCommit: %s@%s %s\n%s' \
+            "$KERNEL_NAME" "$VERSION" "$root" "$(cat out/include/config/kernel.release)" \
+            "$GITHUB_REF_NAME" "${GITHUB_SHA::7}" "$(git log -1 --format=%s | cut -c1-200)" \
+            "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}")
+          args=(-F chat_id="$TG_CHAT" -F document=@"${ZIP_NAME}.zip" --form-string caption="$caption")
+          if [ -n "$TG_THREAD" ]; then args+=(-F message_thread_id="$TG_THREAD"); fi
+          resp=$(curl -sS --retry 3 "https://api.telegram.org/bot${TG_TOKEN}/sendDocument" "${args[@]}")
+          if ! printf '%s' "$resp" | grep -q '"ok":true'; then
+            echo "::error::Telegram upload failed: $(printf '%s' "$resp" | sed -n 's/.*"description":"\([^"]*\)".*/\1/p')"
+            exit 1
+          fi
+          echo "Sent ${ZIP_NAME}.zip to Telegram"
 
       - name: Upload zip for release
         if: github.ref_type == 'tag'

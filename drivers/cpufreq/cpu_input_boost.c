@@ -40,6 +40,14 @@ static struct boost_drv *boost_drv_g __read_mostly;
 static bool enabled __read_mostly;
 module_param(enabled, bool, 0644);
 
+/*
+ * LazyExec: input boost length after the last input event. A fling keeps
+ * scrolling ~1 s after the finger lifts, so 64 ms leaves it unboosted.
+ */
+static unsigned int input_boost_duration_ms __read_mostly =
+	CONFIG_INPUT_BOOST_DURATION_MS;
+module_param(input_boost_duration_ms, uint, 0644);
+
 static u32 get_input_boost_freq(struct cpufreq_policy *policy)
 {
 	u32 freq;
@@ -100,7 +108,7 @@ static void __cpu_input_boost_kick(struct boost_drv *b)
 	set_boost_bit(b, INPUT_BOOST);
 	wake_up(&b->boost_waitq);
 	mod_delayed_work(system_unbound_wq, &b->input_unboost,
-			 msecs_to_jiffies(CONFIG_INPUT_BOOST_DURATION_MS));
+			 msecs_to_jiffies(READ_ONCE(input_boost_duration_ms)));
 }
 
 void cpu_input_boost_kick(void)

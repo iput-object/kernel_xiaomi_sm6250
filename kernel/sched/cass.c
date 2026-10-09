@@ -69,7 +69,7 @@ static int cass_boost_nice __read_mostly = -10;
 module_param(cass_boost_nice, int, 0644);
 
 /* Needs RCU read lock for the task group */
-static __always_inline bool cass_task_boosted(struct task_struct *p)
+static inline bool cass_task_boosted(struct task_struct *p)
 {
 #ifdef CONFIG_CGROUP_SCHED
 	struct cgroup *cgrp;

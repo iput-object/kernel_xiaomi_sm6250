@@ -9357,6 +9357,10 @@ static inline int migrate_degrades_locality(struct task_struct *p,
 /*
  * can_migrate_task - may task p from runqueue rq be migrated to this_cpu?
  */
+#ifdef CONFIG_SCHED_CASS
+static inline bool cass_task_boosted(struct task_struct *p);
+#endif
+
 static
 int can_migrate_task(struct task_struct *p, struct lb_env *env)
 {
@@ -9377,6 +9381,17 @@ int can_migrate_task(struct task_struct *p, struct lb_env *env)
 	if (p->in_iowait && is_min_capacity_cpu(env->dst_cpu) &&
 			!is_min_capacity_cpu(env->src_cpu))
 		return 0;
+
+#ifdef CONFIG_SCHED_CASS
+	/*
+	 * CASS wakes boosted top-app tasks on the big cores; don't let the
+	 * load balancer pull them back to an idle little core.
+	 */
+	if (capacity_orig_of(env->dst_cpu) <= SCHED_CAPACITY_SCALE / 2 &&
+	    capacity_orig_of(env->src_cpu) > SCHED_CAPACITY_SCALE / 2 &&
+	    cass_task_boosted(p))
+		return 0;
+#endif
 
 	if (!cpumask_test_cpu(env->dst_cpu, &p->cpus_allowed)) {
 		int cpu;

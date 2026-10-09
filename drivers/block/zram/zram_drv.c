@@ -33,6 +33,7 @@
 #include <linux/sysfs.h>
 #include <linux/debugfs.h>
 #include <linux/cpuhotplug.h>
+#include <linux/sched/signal.h>
 
 #include "zram_drv.h"
 
@@ -111,6 +112,22 @@ static void zram_clear_flag(struct zram *zram, u32 index,
 			enum zram_pageflags flag)
 {
 	zram->table[index].flags &= ~BIT(flag);
+	if (flag == ZRAM_IDLE)
+		zram->table[index].flags &=
+			~(ZRAM_IDLE_MAX_AGE << ZRAM_IDLE_AGE_SHIFT);
+}
+
+static unsigned long zram_get_idle_age(struct zram *zram, u32 index)
+{
+	return (zram->table[index].flags >> ZRAM_IDLE_AGE_SHIFT) &
+		ZRAM_IDLE_MAX_AGE;
+}
+
+static void zram_set_idle_age(struct zram *zram, u32 index,
+			unsigned long age)
+{
+	zram->table[index].flags &= ~(ZRAM_IDLE_MAX_AGE << ZRAM_IDLE_AGE_SHIFT);
+	zram->table[index].flags |= age << ZRAM_IDLE_AGE_SHIFT;
 }
 
 static inline void zram_set_element(struct zram *zram, u32 index,
@@ -297,6 +314,8 @@ static ssize_t idle_store(struct device *dev,
 	unsigned long nr_pages = zram->disksize >> PAGE_SHIFT;
 	int index;
 
+	BUILD_BUG_ON(ZRAM_IDLE_AGE_SHIFT + ZRAM_IDLE_AGE_BITS > BITS_PER_LONG);
+
 	if (!sysfs_streq(buf, "all"))
 		return -EINVAL;
 
@@ -313,8 +332,15 @@ static ssize_t idle_store(struct device *dev,
 		 */
 		zram_slot_lock(zram, index);
 		if (zram_allocated(zram, index) &&
-				!zram_test_flag(zram, index, ZRAM_UNDER_WB))
+				!zram_test_flag(zram, index, ZRAM_UNDER_WB)) {
+			unsigned long age = zram_get_idle_age(zram, index);
+
+			if (!zram_test_flag(zram, index, ZRAM_IDLE))
+				age = 0;
+			if (age < ZRAM_IDLE_MAX_AGE)
+				zram_set_idle_age(zram, index, age + 1);
 			zram_set_flag(zram, index, ZRAM_IDLE);
+		}
 		zram_slot_unlock(zram, index);
 	}
 
@@ -613,13 +639,21 @@ static ssize_t writeback_store(struct device *dev,
 	ssize_t ret = len;
 	int mode;
 	unsigned long blk_idx = 0;
+	unsigned long max_pages = ULONG_MAX, written = 0;
+	unsigned long min_age = 1;
 
 	if (sysfs_streq(buf, "idle"))
 		mode = IDLE_WRITEBACK;
 	else if (sysfs_streq(buf, "huge"))
 		mode = HUGE_WRITEBACK;
+	else if (sscanf(buf, "idle %lu %lu", &max_pages, &min_age) == 2)
+		mode = IDLE_WRITEBACK;
 	else
 		return -EINVAL;
+
+	if (!max_pages)
+		return len;
+	min_age = clamp(min_age, 1UL, ZRAM_IDLE_MAX_AGE);
 
 	down_read(&zram->init_lock);
 	if (!init_done(zram)) {
@@ -644,6 +678,15 @@ static ssize_t writeback_store(struct device *dev,
 		bvec.bv_page = page;
 		bvec.bv_len = PAGE_SIZE;
 		bvec.bv_offset = 0;
+
+		if (written >= max_pages)
+			break;
+
+		/* vold signals the flush process to stop it early */
+		if (signal_pending(current)) {
+			ret = -EINTR;
+			break;
+		}
 
 		spin_lock(&zram->wb_limit_lock);
 		if (zram->wb_limit_enable && !zram->bd_wb_limit) {
@@ -671,7 +714,8 @@ static ssize_t writeback_store(struct device *dev,
 			goto next;
 
 		if (mode == IDLE_WRITEBACK &&
-			  !zram_test_flag(zram, index, ZRAM_IDLE))
+			  (!zram_test_flag(zram, index, ZRAM_IDLE) ||
+			   zram_get_idle_age(zram, index) < min_age))
 			goto next;
 		if (mode == HUGE_WRITEBACK &&
 			  !zram_test_flag(zram, index, ZRAM_HUGE))
@@ -735,6 +779,7 @@ static ssize_t writeback_store(struct device *dev,
 		zram_set_flag(zram, index, ZRAM_WB);
 		zram_set_element(zram, index, blk_idx);
 		blk_idx = 0;
+		written++;
 		atomic64_inc(&zram->stats.pages_stored);
 		spin_lock(&zram->wb_limit_lock);
 		if (zram->wb_limit_enable && zram->bd_wb_limit > 0)
@@ -1081,6 +1126,37 @@ static ssize_t bd_stat_show(struct device *dev,
 
 	return ret;
 }
+
+/* Pages that can be written back, by idle age 1..ZRAM_IDLE_MAX_AGE */
+static ssize_t idle_stat_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	struct zram *zram = dev_to_zram(dev);
+	unsigned long count[ZRAM_IDLE_MAX_AGE + 1] = { 0 };
+	unsigned long nr_pages, index, age;
+	ssize_t ret = 0;
+
+	down_read(&zram->init_lock);
+	nr_pages = init_done(zram) ? zram->disksize >> PAGE_SHIFT : 0;
+	for (index = 0; index < nr_pages; index++) {
+		zram_slot_lock(zram, index);
+		if (zram_allocated(zram, index) &&
+		    zram_test_flag(zram, index, ZRAM_IDLE) &&
+		    !zram_test_flag(zram, index, ZRAM_WB) &&
+		    !zram_test_flag(zram, index, ZRAM_SAME) &&
+		    !zram_test_flag(zram, index, ZRAM_UNDER_WB))
+			count[zram_get_idle_age(zram, index)]++;
+		zram_slot_unlock(zram, index);
+	}
+	up_read(&zram->init_lock);
+
+	for (age = 1; age <= ZRAM_IDLE_MAX_AGE; age++)
+		ret += scnprintf(buf + ret, PAGE_SIZE - ret, "%lu%c",
+				count[age],
+				age == ZRAM_IDLE_MAX_AGE ? '\n' : ' ');
+
+	return ret;
+}
 #endif
 
 static ssize_t debug_stat_show(struct device *dev,
@@ -1105,6 +1181,7 @@ static DEVICE_ATTR_RO(io_stat);
 static DEVICE_ATTR_RO(mm_stat);
 #ifdef CONFIG_ZRAM_WRITEBACK
 static DEVICE_ATTR_RO(bd_stat);
+static DEVICE_ATTR_RO(idle_stat);
 #endif
 static DEVICE_ATTR_RO(debug_stat);
 
@@ -1874,6 +1951,7 @@ static struct attribute *zram_disk_attrs[] = {
 	&dev_attr_mm_stat.attr,
 #ifdef CONFIG_ZRAM_WRITEBACK
 	&dev_attr_bd_stat.attr,
+	&dev_attr_idle_stat.attr,
 #endif
 	&dev_attr_debug_stat.attr,
 	NULL,

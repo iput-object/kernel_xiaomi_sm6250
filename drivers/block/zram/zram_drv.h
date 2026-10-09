@@ -54,6 +54,15 @@ enum zram_pageflags {
 	__NR_ZRAM_PAGEFLAGS,
 };
 
+/*
+ * Idle age (number of idle markings survived without access) lives in the
+ * flag bits above the page flags. Xiaomi's ExtM reads the per-age histogram
+ * from idle_stat and writes back "idle <nr_pages> <min_age>".
+ */
+#define ZRAM_IDLE_AGE_SHIFT	__NR_ZRAM_PAGEFLAGS
+#define ZRAM_IDLE_AGE_BITS	4
+#define ZRAM_IDLE_MAX_AGE	((1UL << ZRAM_IDLE_AGE_BITS) - 1)
+
 /*-- Data structures */
 
 /* Allocated for each disk page */

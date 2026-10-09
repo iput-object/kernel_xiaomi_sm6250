@@ -5,6 +5,7 @@
  */
 
 #include "sched.h"
+#include <linux/moduleparam.h>
 
 #include <linux/interrupt.h>
 #include <linux/slab.h>
@@ -1476,6 +1477,63 @@ static void yield_task_rt(struct rq *rq)
 static int find_lowest_rq(struct task_struct *task);
 
 /*
+ * LazyExec: HyperOS SchedBoostService makes the top-app UI thread SCHED_FIFO
+ * during gestures. cpupri prefers idle CPUs, which are the little cores while
+ * the big cores run the app's CFS render threads, so 97% of Insta's FIFO UI
+ * wakeups landed on little cores. Put top-app RT tasks on a big core they can
+ * preempt. echo 0 > /sys/module/rt/parameters/rt_topapp_big disables it.
+ */
+static bool rt_topapp_big __read_mostly = true;
+module_param(rt_topapp_big, bool, 0644);
+
+static bool rt_task_topapp(struct task_struct *p)
+{
+#ifdef CONFIG_CGROUP_SCHED
+	struct cgroup *cgrp;
+	bool ret;
+
+	if (!READ_ONCE(rt_topapp_big))
+		return false;
+
+	rcu_read_lock();
+	cgrp = task_group(p)->css.cgroup;
+	ret = cgrp && cgrp->kn && !strcmp(cgrp->kn->name, "top-app");
+	rcu_read_unlock();
+	return ret;
+#else
+	return false;
+#endif
+}
+
+/* Big CPU @p can preempt: idle first, then lowest RT prio, then task_cpu */
+static int rt_topapp_big_cpu(struct task_struct *p)
+{
+	int cpu, best = -1, best_prio = -1;
+
+	for_each_cpu_and(cpu, &p->cpus_allowed, cpu_active_mask) {
+		int prio;
+
+		if (capacity_orig_of(cpu) <= SCHED_CAPACITY_SCALE / 2)
+			continue;
+
+		prio = READ_ONCE(cpu_rq(cpu)->rt.highest_prio.curr);
+		if (prio <= p->prio)
+			continue;
+
+		if (idle_cpu(cpu))
+			prio = MAX_RT_PRIO + 1;
+
+		if (prio > best_prio ||
+		    (prio == best_prio && cpu == task_cpu(p))) {
+			best = cpu;
+			best_prio = prio;
+		}
+	}
+
+	return best;
+}
+
+/*
  * Return whether the task on the given cpu is currently non-preemptible
  * while handling a potentially long softint, or if the task is likely
  * to block preemptions soon because (a) it is a ksoftirq thread that is
@@ -1546,6 +1604,14 @@ select_task_rq_rt(struct task_struct *p, int cpu, int sd_flag, int flags,
 	 * will have to sort it out.
 	 */
 	may_not_preempt = task_may_not_preempt(curr, cpu);
+	if (rt_task_topapp(p)) {
+		int target = rt_topapp_big_cpu(p);
+
+		if (target != -1) {
+			cpu = target;
+			goto unlock;
+		}
+	}
 	if (energy_aware() || may_not_preempt ||
 	    (unlikely(rt_task(curr)) &&
 	     (curr->nr_cpus_allowed < 2 ||
@@ -1575,6 +1641,7 @@ select_task_rq_rt(struct task_struct *p, int cpu, int sd_flag, int flags,
 		    p->prio < cpu_rq(target)->rt.highest_prio.curr))
 			cpu = target;
 	}
+unlock:
 	rcu_read_unlock();
 
 out:

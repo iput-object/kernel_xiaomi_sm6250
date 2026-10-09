@@ -1818,6 +1818,11 @@ static void put_prev_task_rt(struct rq *rq, struct task_struct *p)
 
 static int pick_rt_task(struct rq *rq, struct task_struct *p, int cpu)
 {
+	/* Idle little cores must not pull top-app RT tasks off the big cores */
+	if (capacity_orig_of(cpu) <= SCHED_CAPACITY_SCALE / 2 &&
+	    rt_task_topapp(p))
+		return 0;
+
 	if (!task_running(rq, p) &&
 	    cpumask_test_cpu(cpu, &p->cpus_allowed))
 		return 1;
@@ -1966,6 +1971,15 @@ static int find_lowest_rq(struct task_struct *task)
 
 	if (task->nr_cpus_allowed == 1)
 		return -1; /* No other targets possible */
+
+	/*
+	 * A top-app RT task preempted on a big core (crtc_commit/kgsl_worker
+	 * at prio 83, sub-ms) was pushed to an idle little core and finished
+	 * its frame there. Only move it to a big core it can preempt;
+	 * otherwise keep it queued where it is.
+	 */
+	if (rt_task_topapp(task))
+		return rt_topapp_big_cpu(task);
 
 	if (!cpupri_find(&task_rq(task)->rd->cpupri, task, lowest_mask))
 		return -1; /* No targets found */

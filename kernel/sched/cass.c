@@ -68,6 +68,13 @@ unsigned long cass_cpu_util(int cpu, int this_cpu, bool sync)
 static int cass_boost_nice __read_mostly = -10;
 module_param(cass_boost_nice, int, 0644);
 
+/* Debug counters (racy, read-only): where the boost path stops */
+static unsigned long cass_dbg_nice, cass_dbg_topapp, cass_dbg_fit, cass_dbg_big;
+module_param_named(dbg_nice_ok, cass_dbg_nice, ulong, 0444);
+module_param_named(dbg_topapp, cass_dbg_topapp, ulong, 0444);
+module_param_named(dbg_fit_found, cass_dbg_fit, ulong, 0444);
+module_param_named(dbg_picked_big, cass_dbg_big, ulong, 0444);
+
 /* Needs RCU read lock for the task group */
 static __always_inline bool cass_task_boosted(struct task_struct *p)
 {
@@ -77,8 +84,13 @@ static __always_inline bool cass_task_boosted(struct task_struct *p)
 	if (task_nice(p) > READ_ONCE(cass_boost_nice))
 		return false;
 
+	WRITE_ONCE(cass_dbg_nice, cass_dbg_nice + 1);
 	cgrp = task_group(p)->css.cgroup;
-	return cgrp && cgrp->kn && !strcmp(cgrp->kn->name, "top-app");
+	if (!cgrp || !cgrp->kn || strcmp(cgrp->kn->name, "top-app"))
+		return false;
+
+	WRITE_ONCE(cass_dbg_topapp, cass_dbg_topapp + 1);
+	return true;
 #else
 	return false;
 #endif
@@ -164,8 +176,10 @@ static int cass_best_cpu(struct task_struct *p, int prev_cpu, bool sync)
 			if (fits_capacity(fit_util, capacity_of(cpu)))
 				cpumask_set_cpu(cpu, &fit_mask);
 		}
-		if (!cpumask_empty(&fit_mask))
+		if (!cpumask_empty(&fit_mask)) {
 			mask = &fit_mask;
+			WRITE_ONCE(cass_dbg_fit, cass_dbg_fit + 1);
+		}
 	}
 	for_each_cpu_and(cpu, mask, cpu_active_mask) {
 		/* Use the free candidate slot */

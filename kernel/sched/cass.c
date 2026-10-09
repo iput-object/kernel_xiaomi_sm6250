@@ -138,6 +138,8 @@ static int cass_best_cpu(struct task_struct *p, int prev_cpu, bool sync)
 	struct cpuidle_state *idle_state;
 	bool has_idle = false;
 	unsigned long p_util, fit_util;
+	const struct cpumask *mask = &p->cpus_allowed;
+	struct cpumask fit_mask;
 	int cidx = 0, cpu;
 
 	/* Get the utilization for this task */
@@ -149,9 +151,23 @@ static int cass_best_cpu(struct task_struct *p, int prev_cpu, bool sync)
 	 */
 	rcu_read_lock();
 	fit_util = p_util;
-	if (cass_task_boosted(p))
+	if (cass_task_boosted(p)) {
 		fit_util = max_t(unsigned long, fit_util, CASS_BOOST_UTIL);
-	for_each_cpu_and(cpu, &p->cpus_allowed, cpu_active_mask) {
+		/*
+		 * An idle CPU always beats a busy one below, so a boosted task
+		 * would still land on an idle little core whenever the big cores
+		 * are busy (92% of Insta's UI wakeups). Only consider the CPUs
+		 * that fit it, unless none of them are usable.
+		 */
+		cpumask_clear(&fit_mask);
+		for_each_cpu_and(cpu, &p->cpus_allowed, cpu_active_mask) {
+			if (fits_capacity(fit_util, capacity_of(cpu)))
+				cpumask_set_cpu(cpu, &fit_mask);
+		}
+		if (!cpumask_empty(&fit_mask))
+			mask = &fit_mask;
+	}
+	for_each_cpu_and(cpu, mask, cpu_active_mask) {
 		/* Use the free candidate slot */
 		struct rq *rq = cpu_rq(cpu);
 		curr = &cands[cidx];

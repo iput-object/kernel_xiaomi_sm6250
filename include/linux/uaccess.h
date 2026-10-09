@@ -355,12 +355,12 @@ extern long __strncpy_from_unsafe(char *dst, const void *unsafe_addr, long count
 long strncpy_from_user_nofault(char *dst, const void __user *unsafe_addr,
 		long count);
 
-/* 5.8 names for the strict kernel-address variants, used by backported BPF code */
-static inline long copy_from_kernel_nofault(void *dst, const void *src,
-					    size_t size)
-{
-	return probe_kernel_read_strict(dst, src, size);
-}
+/*
+ * 5.8 names for the strict kernel-address variants, used by backported BPF code.
+ * copy_from_kernel_nofault() is out of line: BakaSU defines a __weak fallback
+ * for < 5.8 kernels, which an inline here would clash with.
+ */
+extern long copy_from_kernel_nofault(void *dst, const void *src, size_t size);
 
 static inline long strncpy_from_kernel_nofault(char *dst,
 					       const void *unsafe_addr,

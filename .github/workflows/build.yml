@@ -1,7 +1,8 @@
 name: Build Kernel
 
 # Release: push a tag like v1.1 (stable) or v1.1-beta1 (pre-release) -> builds KSU + NoKSU and publishes
-# Test build: Run workflow on any branch -> version is <branch>-<commit> (or the version input), no release
+# Test build: Run workflow on any branch -> version is <branch>-<commit> (or the version input), no release.
+#   Inputs pick the variants (KSU, NoKSU or both in one run), the BakaSU ref, extra config and outputs.
 # Telegram: every build is sent to the chat when the TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID secrets are set
 on:
   push:
@@ -9,21 +10,55 @@ on:
       - "v*"
   workflow_dispatch:
     inputs:
-      ksu:
-        description: "BakaSU + SUSFS"
+      variant:
+        description: "Variants to build"
         required: true
-        type: boolean
-        default: true
+        type: choice
+        options:
+          - both
+          - ksu
+          - noksu
+        default: both
       version:
         description: "Version (optional, default <branch>-<commit>)"
         required: false
         type: string
         default: ""
+      ksu_ref:
+        description: "BakaSU branch, tag or commit"
+        required: false
+        type: string
+        default: "main"
+      ksu_debug:
+        description: "KSU: CONFIG_KSU_DEBUG (verbose KernelSU logs)"
+        required: false
+        type: boolean
+        default: false
+      config:
+        description: "Extra config, space separated (CONFIG_FOO=y CONFIG_BAR=n CONFIG_BAZ=123)"
+        required: false
+        type: string
+        default: ""
+      clean:
+        description: "Clean build (no ccache)"
+        required: false
+        type: boolean
+        default: false
+      telegram:
+        description: "Send zips to Telegram"
+        required: false
+        type: boolean
+        default: true
+      build_log:
+        description: "Upload the build log even when the build succeeds"
+        required: false
+        type: boolean
+        default: false
 
 env:
   DEFCONFIG: "vendor/xiaomi/miatoll_defconfig"
   KSU_REPO: "https://github.com/Baka-SU/BakaSU"
-  KSU_BRANCH: "main"
+  KSU_BRANCH: ${{ inputs.ksu_ref || 'main' }}
   CLANG_URL: "https://github.com/topnotchfreaks/clang/releases/download/v1.0.0/clang-r547379.tar.gz"
   KBUILD_BUILD_USER: ${{ github.repository_owner }}
   KBUILD_BUILD_HOST: "github-actions"
@@ -35,7 +70,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        ksu: ${{ fromJSON(github.event_name == 'push' && '[true, false]' || format('[{0}]', inputs.ksu)) }}
+        # tag push and variant=both build both; otherwise only the chosen one
+        ksu: ${{ fromJSON((github.event_name == 'push' || inputs.variant == 'both') && '[true, false]' || (inputs.variant == 'ksu' && '[true]' || '[false]')) }}
     env:
       KSU: ${{ matrix.ksu }}
 
@@ -87,6 +123,7 @@ jobs:
           curl -LSs "$CLANG_URL" | tar -xzf - -C clang
 
       - name: Cache ccache
+        if: ${{ !inputs.clean }}
         uses: actions/cache@v4
         with:
           path: ~/.ccache
@@ -101,7 +138,9 @@ jobs:
           # drivers/kernelsu is a symlink to ../KernelSU/kernel; the Makefile and Kconfig entries are already in tree
           # full history (blobless): BakaSU's version code is 30000 + commit count + 700,
           # and its Kbuild needs KernelSU/.git, so no shallow clone and no plain copy
-          git clone --filter=blob:none -b "$KSU_BRANCH" "$KSU_REPO" KernelSU
+          # clone then checkout, so KSU_BRANCH may also be a tag or a commit
+          git clone --filter=blob:none "$KSU_REPO" KernelSU
+          git -C KernelSU checkout -q "$KSU_BRANCH"
           echo "BakaSU: $(git -C KernelSU log -1 --format='%h %s') ($(git -C KernelSU rev-list --count HEAD) commits)"
           echo "KSU_COMMIT=$(git -C KernelSU log -1 --format=%h)" >> "$GITHUB_ENV"
 
@@ -115,9 +154,14 @@ jobs:
           sed -i '/kernelsu\//d' drivers/Makefile
 
       - name: Build
+        env:
+          EXTRA_CONFIG: ${{ inputs.config }}
+          KSU_DEBUG: ${{ inputs.ksu_debug }}
+          CLEAN: ${{ inputs.clean }}
         run: |
           export PATH="$GITHUB_WORKSPACE/clang/bin:$PATH"
           export ARCH=arm64 SUBARCH=arm64
+          if [ "$CLEAN" = true ]; then export CCACHE_DISABLE=1; fi
           ccache -M 3G
           # LLVM_IAS=1 makes clang use its own assembler; LTO still falls back to
           # GNU gold unless ld.lld and the llvm tools are named explicitly.
@@ -127,6 +171,29 @@ jobs:
             CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu-
             CROSS_COMPILE_ARM32=arm-linux-gnueabi- LOCALVERSION="-${VERSION}")
           make "${MAKE_ARGS[@]}" "${DEFCONFIG}"
+          # dispatch toggles on top of the defconfig
+          extra="$EXTRA_CONFIG"
+          if [ "$KSU" = true ] && [ "$KSU_DEBUG" = true ]; then extra="$extra CONFIG_KSU_DEBUG=y"; fi
+          if [ -n "${extra// /}" ]; then
+            for opt in $extra; do
+              case "$opt" in
+                CONFIG_*=n) scripts/config --file out/.config --disable "${opt%%=*}" ;;
+                CONFIG_*=*) scripts/config --file out/.config --set-val "${opt%%=*}" "${opt#*=}" ;;
+                *) echo "::error::bad config entry '$opt' (want CONFIG_NAME=value)"; exit 1 ;;
+              esac
+            done
+            make "${MAKE_ARGS[@]}" olddefconfig
+            for opt in $extra; do
+              name="${opt%%=*}"
+              # a dependency can silently drop an option; say so instead of building something else
+              got=$(grep -E "^${name}=|^# ${name} is not set" out/.config || echo "${name} missing")
+              echo "config: requested ${opt} -> ${got}"
+              case "$opt" in
+                *=n) case "$got" in "# ${name} is not set"|"${name} missing") ;; *) echo "::warning::${opt} did not apply (${got})" ;; esac ;;
+                *) [ "$got" = "$opt" ] || [ "$got" = "${name}=\"${opt#*=}\"" ] || echo "::warning::${opt} did not apply (${got})" ;;
+              esac
+            done
+          fi
           make -j"$(nproc --all)" "${MAKE_ARGS[@]}" \
             Image.gz dtbo.img dtb.img 2>&1 | tee build.log
           rc="${PIPESTATUS[0]}"
@@ -144,7 +211,7 @@ jobs:
           ccache -s
 
       - name: Upload build log
-        if: failure()
+        if: ${{ failure() || inputs.build_log }}
         uses: actions/upload-artifact@v4
         with:
           name: build-log-${{ matrix.ksu && 'ksu' || 'noksu' }}
@@ -174,6 +241,7 @@ jobs:
           include-hidden-files: true
 
       - name: Upload to Telegram
+        if: ${{ github.event_name == 'push' || inputs.telegram }}
         env:
           TG_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TG_CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}

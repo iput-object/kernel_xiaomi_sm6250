@@ -3008,8 +3008,7 @@ static bool should_skip_mm(struct mm_struct *mm, struct mm_walk_args *args)
 			       get_mm_counter(mm, MM_SHMEMPAGES);
 	}
 
-	pgtables = PTRS_PER_PTE * sizeof(pte_t) * atomic_long_read(&mm->nr_ptes);
-	pgtables += PTRS_PER_PMD * sizeof(pmd_t) * mm_nr_pmds(mm);
+	pgtables = mm_pgtables_bytes(mm);
 
 	/* leave the legwork to the rmap if mappings are too sparse */
 	if (size < max(SWAP_CLUSTER_MAX, pgtables / PAGE_SIZE))
@@ -4188,7 +4187,7 @@ static bool evict_pages(struct lruvec *lruvec, struct scan_control *sc, int swap
 	spin_unlock_irq(&pgdat->lru_lock);
 
 	mem_cgroup_uncharge_list(&list);
-	free_unref_page_list(&list);
+	free_hot_cold_page_list(&list, true);
 
 	sc->nr_reclaimed += reclaimed;
 done:
@@ -4724,7 +4723,11 @@ static void lru_gen_seq_show_full(struct seq_file *m, struct lruvec *lruvec,
 static int lru_gen_seq_show(struct seq_file *m, void *v)
 {
 	unsigned long seq;
+#ifdef CONFIG_DEBUG_FS
 	bool full = !debugfs_real_fops(m->file)->write;
+#else
+	bool full = false;
+#endif
 	struct lruvec *lruvec = v;
 	struct lrugen *lrugen = &lruvec->evictable;
 	int nid = lruvec_pgdat(lruvec)->node_id;

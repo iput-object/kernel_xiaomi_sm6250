@@ -439,7 +439,6 @@ static inline void cgroup_put(struct cgroup *cgrp)
  * The caller can also specify additional allowed conditions via @__c, such
  * as locks used during the cgroup_subsys::attach() methods.
  */
-#ifdef CONFIG_PROVE_RCU
 extern struct mutex cgroup_mutex;
 
 static inline void cgroup_lock(void)
@@ -451,6 +450,9 @@ static inline void cgroup_unlock(void)
 {
 	mutex_unlock(&cgroup_mutex);
 }
+
+#ifdef CONFIG_PROVE_RCU
+extern struct mutex cgroup_mutex;
 extern spinlock_t css_set_lock;
 #define task_css_set_check(task, __c)					\
 	rcu_dereference_check((task)->cgroups,				\

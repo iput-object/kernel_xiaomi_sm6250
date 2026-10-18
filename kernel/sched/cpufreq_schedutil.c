@@ -783,7 +783,6 @@ static void sugov_tunables_restore(struct cpufreq_policy *policy)
 
 	tunables->up_rate_limit_us = cached->up_rate_limit_us;
 	tunables->down_rate_limit_us = cached->down_rate_limit_us;
-	update_min_rate_limit_ns(sg_policy);
 }
 
 static int sugov_init(struct cpufreq_policy *policy)
@@ -897,10 +896,15 @@ static int sugov_start(struct cpufreq_policy *policy)
 	struct sugov_policy *sg_policy = policy->governor_data;
 	unsigned int cpu;
 
+	/* Prevent startup from overwriting a concurrent sysfs rate-limit update. */
+	mutex_lock(&sg_policy->tunables->attr_set.update_lock);
 	sg_policy->up_rate_delay_ns =
 		sg_policy->tunables->up_rate_limit_us * NSEC_PER_USEC;
 	sg_policy->down_rate_delay_ns =
 		sg_policy->tunables->down_rate_limit_us * NSEC_PER_USEC;
+	update_min_rate_limit_ns(sg_policy);
+	mutex_unlock(&sg_policy->tunables->attr_set.update_lock);
+
 	sg_policy->last_freq_update_time = 0;
 	sg_policy->next_freq = UINT_MAX;
 	sg_policy->work_in_progress = false;

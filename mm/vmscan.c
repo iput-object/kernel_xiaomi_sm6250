@@ -4244,6 +4244,31 @@ static long get_nr_to_scan(struct lruvec *lruvec, struct scan_control *sc, int s
 	return walk_mm_list(lruvec, max_seq, sc, swappiness, NULL) ? nr_to_scan : 0;
 }
 
+static unsigned long lru_gen_min_ttl_ms;
+
+/* protect the working set: the oldest generations must have lived for min_ttl_ms */
+static bool lru_gen_ttl_protected(struct lruvec *lruvec, struct scan_control *sc, int swappiness)
+{
+	int type;
+	unsigned long ttl = READ_ONCE(lru_gen_min_ttl_ms);
+	DEFINE_MIN_SEQ();
+
+	/* under heavy pressure reclaim must make progress */
+	if (!ttl || sc->priority <= DEF_PRIORITY - 3)
+		return false;
+
+	ttl = msecs_to_jiffies(ttl);
+
+	for (type = !swappiness; type < ANON_AND_FILE; type++) {
+		int gen = lru_gen_from_seq(min_seq[type]);
+
+		if (time_is_before_eq_jiffies(READ_ONCE(lruvec->evictable.timestamps[gen]) + ttl))
+			return false;
+	}
+
+	return true;
+}
+
 static unsigned long lru_gen_shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc)
 {
 	struct blk_plug plug;
@@ -4259,6 +4284,9 @@ static unsigned long lru_gen_shrink_lruvec(struct lruvec *lruvec, struct scan_co
 
 		nr_to_scan = get_nr_to_scan(lruvec, sc, swappiness, &eligible) - scanned;
 		if (nr_to_scan < (long)SWAP_CLUSTER_MAX)
+			break;
+
+		if (lru_gen_ttl_protected(lruvec, sc, swappiness))
 			break;
 
 		scanned += nr_to_scan;
@@ -4602,12 +4630,36 @@ static ssize_t store_lru_gen_enabled(struct kobject *kobj, struct kobj_attribute
 	return len;
 }
 
+static ssize_t show_lru_gen_min_ttl_ms(struct kobject *kobj, struct kobj_attribute *attr,
+				       char *buf)
+{
+	return sprintf(buf, "%lu\n", READ_ONCE(lru_gen_min_ttl_ms));
+}
+
+static ssize_t store_lru_gen_min_ttl_ms(struct kobject *kobj, struct kobj_attribute *attr,
+					const char *buf, size_t len)
+{
+	unsigned long ttl;
+
+	if (kstrtoul(buf, 10, &ttl) || ttl > 60000)
+		return -EINVAL;
+
+	WRITE_ONCE(lru_gen_min_ttl_ms, ttl);
+
+	return len;
+}
+
+static struct kobj_attribute lru_gen_min_ttl_ms_attr = __ATTR(
+	min_ttl_ms, 0644, show_lru_gen_min_ttl_ms, store_lru_gen_min_ttl_ms
+);
+
 static struct kobj_attribute lru_gen_enabled_attr = __ATTR(
 	enabled, 0644, show_lru_gen_enabled, store_lru_gen_enabled
 );
 
 static struct attribute *lru_gen_attrs[] = {
 	&lru_gen_spread_attr.attr,
+	&lru_gen_min_ttl_ms_attr.attr,
 	&lru_gen_enabled_attr.attr,
 	NULL
 };

@@ -125,7 +125,6 @@ void devfreq_register_boost_device(enum df_device device, struct devfreq *df)
 
 	b = &d->devices[device];
 	mutex_lock(&devfreq_boost_lock);
-	df->is_boost_device = true;
 	WRITE_ONCE(b->df, df);
 	mutex_unlock(&devfreq_boost_lock);
 	devfreq_update_boosts(b);
@@ -176,12 +175,10 @@ static void devfreq_update_boosts(struct boost_dev *b)
 	mutex_lock(&df->lock);
 	state = READ_ONCE(b->state);
 	if (state & BIT(SCREEN_OFF)) {
-		df->min_freq = df->profile->freq_table[0];
+		df->boost_min_freq = 0;
 		df->max_boost = false;
 	} else {
-		df->min_freq = state & BIT(INPUT_BOOST) ?
-			       min(b->boost_freq, df->max_freq) :
-			       df->profile->freq_table[0];
+		df->boost_min_freq = state & BIT(INPUT_BOOST) ? b->boost_freq : 0;
 		df->max_boost = state & BIT(MAX_BOOST);
 	}
 	update_devfreq(df);

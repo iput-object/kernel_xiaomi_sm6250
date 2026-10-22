@@ -18,6 +18,9 @@
  */
 
 #include <linux/oom.h>
+#include <linux/pid.h>
+#include <linux/file.h>
+#include <linux/syscalls.h>
 #include <linux/mm.h>
 #include <linux/err.h>
 #include <linux/gfp.h>
@@ -1127,4 +1130,104 @@ void dump_killed_info(struct task_struct *selected)
 				(long)(PAGE_SIZE / 1024),
 			global_node_page_state(NR_FILE_PAGES) *
 				(long)(PAGE_SIZE / 1024));
+}
+
+#ifdef CONFIG_MMU
+/*
+ * This tree has no generic pidfd_get_pid(); resolve the pidfd the same way
+ * upstream does, accepting only real pidfds from pidfd_open()/CLONE_PIDFD.
+ */
+static struct pid *mrelease_pidfd_get_pid(int fd)
+{
+	struct fd f;
+	struct pid *pid;
+
+	f = fdget(fd);
+	if (!f.file)
+		return ERR_PTR(-EBADF);
+
+	if (f.file->f_op == &pidfd_fops)
+		pid = get_pid(f.file->private_data);
+	else
+		pid = ERR_PTR(-EBADF);
+
+	fdput(f);
+	return pid;
+}
+#endif
+
+SYSCALL_DEFINE2(process_mrelease, int, pidfd, unsigned int, flags)
+{
+#ifdef CONFIG_MMU
+	struct mm_struct *mm = NULL;
+	struct task_struct *task;
+	struct task_struct *p;
+	bool reap = false;
+	struct pid *pid;
+	long ret = 0;
+
+	if (flags)
+		return -EINVAL;
+
+	pid = mrelease_pidfd_get_pid(pidfd);
+	if (IS_ERR(pid))
+		return PTR_ERR(pid);
+
+	task = get_pid_task(pid, PIDTYPE_TGID);
+	if (!task) {
+		ret = -ESRCH;
+		goto put_pid;
+	}
+
+	/*
+	 * Make sure to choose a thread which still has a reference to mm
+	 * during the group exit
+	 */
+	p = find_lock_task_mm(task);
+	if (!p) {
+		ret = -ESRCH;
+		goto put_task;
+	}
+
+	if (mmget_not_zero(p->mm)) {
+		mm = p->mm;
+		if (task_will_free_mem(p))
+			reap = true;
+		else {
+			/* Error only if the work has not been done already */
+			if (!test_bit(MMF_OOM_SKIP, &mm->flags))
+				ret = -EINVAL;
+		}
+	}
+	task_unlock(p);
+
+	if (!reap)
+		goto drop_mm;
+
+	if (down_read_killable(&mm->mmap_sem)) {
+		ret = -EINTR;
+		goto drop_mm;
+	}
+	/*
+	 * Notifier-backed mms need nonblocking MMU invalidation, which this
+	 * tree lacks, before they can be reaped safely from this syscall.
+	 * The existing OOM reaper skips them for the same reason.
+	 */
+	if (mm_has_notifiers(mm))
+		ret = -EAGAIN;
+	else if (!test_bit(MMF_OOM_SKIP, &mm->flags))
+		__oom_reap_task_mm(mm);
+	up_read(&mm->mmap_sem);
+
+drop_mm:
+	if (mm)
+		mmput(mm);
+put_task:
+	put_task_struct(task);
+put_pid:
+	put_pid(pid);
+	return ret;
+#else
+	return -ENOSYS;
+#endif /* CONFIG_MMU */
 }

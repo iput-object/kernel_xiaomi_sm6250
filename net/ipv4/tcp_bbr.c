@@ -64,7 +64,6 @@
 #include <linux/random.h>
 #include <linux/win_minmax.h>
 
-#include <trace/events/tcp.h>
 #include "tcp_dctcp.h"
 #include "tcp_plb.h"
 

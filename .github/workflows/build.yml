@@ -28,7 +28,7 @@ on:
         description: "BakaSU branch, tag or commit"
         required: false
         type: string
-        default: "5b76b884" # last BakaSU that builds with SUSFS (48fa4bb7 blocks it)
+        default: "d5e9e025" # BakaSU main 2026-10-24, susfs build re-enabled
       ksu_debug:
         description: "KSU: CONFIG_KSU_DEBUG (verbose KernelSU logs)"
         required: false
@@ -58,7 +58,7 @@ on:
 env:
   DEFCONFIG: "vendor/xiaomi/miatoll_defconfig"
   KSU_REPO: "https://github.com/Baka-SU/BakaSU"
-  KSU_BRANCH: ${{ inputs.ksu_ref || '5b76b884' }}
+  KSU_BRANCH: ${{ inputs.ksu_ref || 'd5e9e025' }}
   CLANG_URL: "https://github.com/topnotchfreaks/clang/releases/download/v1.0.0/clang-r547379.tar.gz"
   KBUILD_BUILD_USER: ${{ github.repository_owner }}
   KBUILD_BUILD_HOST: "github-actions"

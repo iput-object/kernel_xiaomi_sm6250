@@ -69,8 +69,28 @@ struct lpm_cluster *lpm_root_node;
 static bool lpm_prediction = true;
 module_param_named(lpm_prediction, lpm_prediction, bool, 0664);
 
-static bool cluster_use_deepest_state = true;
+/*
+ * Off by default: cluster_select_deepest() skips the num_cpu_votes,
+ * suspend_enabled/idle_enabled and latency checks, so from idle the last cpu
+ * can take the cluster (and AOSS, via llcc-off/cx-ret) down while its siblings
+ * are only in wfi or pc instead of the rail-pc those levels require.
+ */
+static bool cluster_use_deepest_state;
 module_param(cluster_use_deepest_state, bool, 0664);
+
+/*
+ * Mark each step of system suspend in the kernel log. The console is pstore
+ * (synchronous RAM), so after a hang the last marker shows whether the kernel
+ * stopped before the rpmh flush, inside PSCI/firmware, or on the way back.
+ */
+static bool suspend_trace = IS_ENABLED(CONFIG_DEBUG_PERSISTENT_LOG);
+module_param(suspend_trace, bool, 0664);
+
+#define lpm_strace(fmt, ...)						\
+	do {								\
+		if (suspend_trace)					\
+			pr_info("strace: " fmt "\n", ##__VA_ARGS__);	\
+	} while (0)
 
 static uint32_t bias_hyst;
 module_param_named(bias_hyst, bias_hyst, uint, 0664);
@@ -1123,9 +1143,16 @@ static int cluster_configure(struct lpm_cluster *cluster, int idx,
 		cpumask_copy(&cpumask, cpumask_of(cpu));
 		clear_predict_history();
 		clear_cl_predict_history();
+		if (!from_idle)
+			lpm_strace("rpmh flush, wake cpu%d", cpu);
 		if (sys_pm_ops && sys_pm_ops->enter)
-			if ((sys_pm_ops->enter(&cpumask)))
+			if ((sys_pm_ops->enter(&cpumask))) {
+				if (!from_idle)
+					lpm_strace("rpmh flush failed");
 				return -EBUSY;
+			}
+		if (!from_idle)
+			lpm_strace("rpmh flushed");
 	}
 	/* Notify cluster enter event after successfully config completion */
 	cluster_notify(cluster, level, true);
@@ -1735,13 +1762,17 @@ static int lpm_suspend_enter(suspend_state_t state)
 		pr_err("Failed suspend\n");
 		return 0;
 	}
+	lpm_strace("enter cpu%d idx %d", cpu, idx);
 	cpu_prepare(lpm_cpu, idx, false);
 	cluster_prepare(cluster, cpumask, idx, false, 0);
+	lpm_strace("psci cluster lvl %d", cluster->last_level);
 
 	success = psci_enter_sleep(lpm_cpu, idx, false);
 
+	lpm_strace("psci back %d", success);
 	cluster_unprepare(cluster, cpumask, idx, false, 0, success);
 	cpu_unprepare(lpm_cpu, idx, false);
+	lpm_strace("exit");
 	return 0;
 }
 

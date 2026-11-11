@@ -114,6 +114,16 @@ static int enable = 1;
 module_param(enable, int, 0000);
 
 /*
+ * Keep the watchdog counting through system suspend (what "qcom,wakeup-enable"
+ * does), so a suspend that never comes back bites and resets the phone instead
+ * of leaving it frozen until the power key is held. This is the stock Qualcomm
+ * atoll setting; b90625a0aa44 dropped it over false bites in s2idle, and this
+ * phone suspends with deep. Set watchdog_v2.wdog_in_suspend=1 on the cmdline.
+ */
+static bool wdog_in_suspend;
+module_param(wdog_in_suspend, bool, 0444);
+
+/*
  * On the kernel command line specify
  * watchdog_v2.WDT_HZ=<clock val in HZ> to set Watchdog
  * ticks. By default it is set to 32765.
@@ -862,7 +872,8 @@ static int msm_wdog_dt_to_pdata(struct platform_device *pdev,
 		return -ENXIO;
 	}
 	pdata->wakeup_irq_enable = of_property_read_bool(node,
-							 "qcom,wakeup-enable");
+							 "qcom,wakeup-enable") ||
+				   wdog_in_suspend;
 
 	num_scandump_sizes = of_property_count_elems_of_size(node,
 							"qcom,scandump-sizes",

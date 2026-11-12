@@ -180,7 +180,7 @@ jobs:
             BOOTPARAM_SOFTLOCKUP_PANIC=y BOOTPARAM_SOFTLOCKUP_PANIC_VALUE=1 DETECT_HUNG_TASK=y \
             BOOTPARAM_HUNG_TASK_PANIC=y BOOTPARAM_HUNG_TASK_PANIC_VALUE=1 \
             DEFAULT_HUNG_TASK_TIMEOUT=60 PANIC_ON_OOPS=y PANIC_ON_OOPS_VALUE=1 \
-            DEBUG_FS=y MSM_TZ_LOG=y; do
+            DEBUG_FS=y MSM_TZ_LOG=y QCOM_MEMORY_DUMP_V2=y; do
             name="${opt%%=*}"
             sed -i -e "/^# CONFIG_${name} is not set$/d" -e "/^CONFIG_${name}=/d" "$cfg"
             echo "CONFIG_${opt}" >> "$cfg"
@@ -189,7 +189,12 @@ jobs:
           # keep a console log in RAM as well
           grep -q 'record-size = <0x200000>;' "$atoll"
           sed -i -e 's/record-size = <0x200000>;/record-size = <0x100000>;\n\t\tconsole-size = <0x200000>;/' \
-            -e 's/pmsg-size = <0x200000>;/pmsg-size = <0x100000>;/' "$atoll"
+            -e 's/pmsg-size = <0x200000>;/pmsg-size = <0x080000>;/' "$atoll"
+          # give the top 512K of the ramoops carve-out to the watchdog: TZ writes each cpu's
+          # registers there on a bite, it survives the warm reset and the next boot prints it
+          grep -q 'reg = <0x0 0x9d800000 0x0 0x00400000>;' "$atoll"
+          sed -i 's/reg = <0x0 0x9d800000 0x0 0x00400000>;/reg = <0x0 0x9d800000 0x0 0x00380000>;/' "$atoll"
+          printf '\n&reserved_memory {\n\twdog_ctx_mem: wdog_ctx@9db80000 {\n\t\treg = <0x0 0x9db80000 0x0 0x00080000>;\n\t\tno-map;\n\t};\n};\n\n&wdog {\n\tmemory-region = <&wdog_ctx_mem>;\n};\n' >> "$atoll"
           # holding power resets warm, so RAM survives
           grep -q PON_POWER_OFF_TYPE_HARD_RESET "$pm"
           sed -i 's/PON_POWER_OFF_TYPE_HARD_RESET/PON_POWER_OFF_TYPE_WARM_RESET/' "$pm"

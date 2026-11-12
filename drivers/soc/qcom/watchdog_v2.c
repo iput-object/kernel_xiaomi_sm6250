@@ -23,6 +23,7 @@
 #include <linux/irq.h>
 #include <linux/percpu.h>
 #include <linux/of.h>
+#include <linux/of_address.h>
 #include <linux/cpu.h>
 #include <linux/cpu_pm.h>
 #include <linux/platform_device.h>
@@ -566,6 +567,99 @@ static irqreturn_t wdog_ppi_bark(int irq, void *dev_id)
 	return wdog_bark_handler(irq, wdog_dd);
 }
 
+/*
+ * Debug: keep the per-cpu register dumps that TZ writes on a watchdog bite in
+ * a fixed carve-out ("memory-region" on the wdog node) instead of kmalloc'd
+ * memory, so they survive the warm reset and the next boot can print them.
+ * Without this a hang that leaves no log (cpu stuck in firmware or with irqs
+ * off) only shows that the watchdog fired, not where each cpu was.
+ *
+ * Layout: WDOG_CTX_HDR_BYTES of msm_dump_data headers (one per cpu), then one
+ * MAX_CPU_CTX_SIZE buffer per cpu, then a canary that marks the RAM as ours.
+ * After a hard reset RAM is not kept, the canary is gone and nothing is shown.
+ */
+#define WDOG_CTX_HDR_BYTES	1024
+#define WDOG_CTX_CANARY		0x5844435458434457ULL	/* "WDCXTCDX" */
+#define WDOG_CTX_TZ_MAGIC	0x42445953		/* set by TZ once dumped */
+
+static int configure_bark_dump_fixed(struct msm_watchdog_data *wdog_dd)
+{
+	struct device_node *mn;
+	struct resource res;
+	struct msm_dump_data *hdr;
+	struct msm_dump_entry dump_entry;
+	unsigned int ncpu = num_possible_cpus();
+	size_t need = WDOG_CTX_HDR_BYTES + ncpu * MAX_CPU_CTX_SIZE + sizeof(u64);
+	void *base;
+	u64 *canary;
+	bool kept;
+	int cpu, ret;
+
+	mn = of_parse_phandle(wdog_dd->dev->of_node, "memory-region", 0);
+	if (!mn)
+		return -ENODEV;
+	ret = of_address_to_resource(mn, 0, &res);
+	of_node_put(mn);
+	if (ret)
+		return ret;
+	if (resource_size(&res) < need ||
+	    ncpu * sizeof(*hdr) > WDOG_CTX_HDR_BYTES) {
+		dev_err(wdog_dd->dev, "cpu ctx region too small\n");
+		return -EINVAL;
+	}
+
+	/* uncached: TZ reads the headers and writes the buffers behind our back */
+	base = memremap(res.start, need, MEMREMAP_WC);
+	if (!base) {
+		dev_err(wdog_dd->dev, "cpu ctx region map failed\n");
+		return -ENOMEM;
+	}
+	hdr = base;
+	canary = base + need - sizeof(u64);
+	kept = *canary == WDOG_CTX_CANARY;
+
+	for (cpu = 0; kept && cpu < ncpu; cpu++) {
+		u8 *buf = base + WDOG_CTX_HDR_BYTES + cpu * MAX_CPU_CTX_SIZE;
+		size_t used = MAX_CPU_CTX_SIZE;
+
+		while (used && !buf[used - 1])
+			used--;
+		pr_emerg("wdog_ctx: previous boot cpu%d magic=%#x version=%#x len=%llu bytes=%zu%s\n",
+			 cpu, hdr[cpu].magic, hdr[cpu].version, hdr[cpu].len,
+			 used, hdr[cpu].magic == WDOG_CTX_TZ_MAGIC ?
+			 " (dumped by tz)" : "");
+		if (used) {
+			char prefix[24];
+
+			snprintf(prefix, sizeof(prefix), "wdog_ctx cpu%d: ", cpu);
+			print_hex_dump(KERN_EMERG, prefix, DUMP_PREFIX_OFFSET,
+				       32, 8, buf, ALIGN(used, 32), false);
+		}
+	}
+	if (!kept)
+		pr_info("wdog_ctx: no cpu context kept from the previous boot\n");
+
+	memset(base, 0, need - sizeof(u64));
+	*canary = WDOG_CTX_CANARY;
+
+	for (cpu = 0; cpu < ncpu; cpu++) {
+		hdr[cpu].addr = res.start + WDOG_CTX_HDR_BYTES +
+				cpu * MAX_CPU_CTX_SIZE;
+		hdr[cpu].len = MAX_CPU_CTX_SIZE;
+		snprintf(hdr[cpu].name, sizeof(hdr[cpu].name), "KCPU_CTX%d", cpu);
+		dump_entry.id = MSM_DUMP_DATA_CPU_CTX + cpu;
+		dump_entry.addr = res.start + cpu * sizeof(*hdr);
+		ret = msm_dump_data_register(MSM_DUMP_TABLE_APPS, &dump_entry);
+		if (ret)
+			dev_err(wdog_dd->dev, "cpu %d ctx dump setup failed: %d\n",
+				cpu, ret);
+	}
+	/* make sure TZ sees the headers before anything can bite */
+	wmb();
+	dev_info(wdog_dd->dev, "cpu ctx dump at %pa for %u cpus\n", &res.start, ncpu);
+	return 0;
+}
+
 static void configure_bark_dump(struct msm_watchdog_data *wdog_dd)
 {
 	int ret;
@@ -575,6 +669,9 @@ static void configure_bark_dump(struct msm_watchdog_data *wdog_dd)
 	void *cpu_buf;
 
 	if (!IS_ENABLED(CONFIG_QCOM_MEMORY_DUMP_V2))
+		return;
+
+	if (!configure_bark_dump_fixed(wdog_dd))
 		return;
 
 	cpu_data = kcalloc(num_present_cpus(), sizeof(struct msm_dump_data),

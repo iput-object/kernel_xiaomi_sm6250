@@ -24,6 +24,8 @@
 #include <linux/percpu.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
+#include <linux/memblock.h>
+#include <asm/cacheflush.h>
 #include <linux/cpu.h>
 #include <linux/cpu_pm.h>
 #include <linux/platform_device.h>
@@ -574,6 +576,9 @@ static irqreturn_t wdog_ppi_bark(int irq, void *dev_id)
  * Without this a hang that leaves no log (cpu stuck in firmware or with irqs
  * off) only shows that the watchdog fired, not where each cpu was.
  *
+ * The carve-out is reserved but mapped (no "no-map"): memory dump v2 reads
+ * the headers through phys_to_virt().
+ *
  * Layout: WDOG_CTX_HDR_BYTES of msm_dump_data headers (one per cpu), then one
  * MAX_CPU_CTX_SIZE buffer per cpu, then a canary that marks the RAM as ours.
  * After a hard reset RAM is not kept, the canary is gone and nothing is shown.
@@ -608,12 +613,18 @@ static int configure_bark_dump_fixed(struct msm_watchdog_data *wdog_dd)
 		return -EINVAL;
 	}
 
-	/* uncached: TZ reads the headers and writes the buffers behind our back */
-	base = memremap(res.start, need, MEMREMAP_WC);
-	if (!base) {
-		dev_err(wdog_dd->dev, "cpu ctx region map failed\n");
-		return -ENOMEM;
+	/*
+	 * The region must stay in the linear map (reserved, not no-map): the
+	 * memory dump code reads each header back through phys_to_virt().
+	 */
+	if (!pfn_valid(PHYS_PFN(res.start)) ||
+	    !memblock_is_map_memory(res.start)) {
+		dev_err(wdog_dd->dev, "cpu ctx region is not mapped memory\n");
+		return -EINVAL;
 	}
+	base = phys_to_virt(res.start);
+	/* TZ wrote it with the caches off, drop anything stale before reading */
+	__inval_dcache_area(base, need);
 	hdr = base;
 	canary = base + need - sizeof(u64);
 	kept = *canary == WDOG_CTX_CANARY;
@@ -654,8 +665,8 @@ static int configure_bark_dump_fixed(struct msm_watchdog_data *wdog_dd)
 			dev_err(wdog_dd->dev, "cpu %d ctx dump setup failed: %d\n",
 				cpu, ret);
 	}
-	/* make sure TZ sees the headers before anything can bite */
-	wmb();
+	/* TZ reads the headers from DDR on a bite */
+	dmac_flush_range(base, base + need);
 	dev_info(wdog_dd->dev, "cpu ctx dump at %pa for %u cpus\n", &res.start, ncpu);
 	return 0;
 }
